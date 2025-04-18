@@ -216,7 +216,8 @@ void ModelWidget::updateColor(int index, QColor color){
 }
 
 // --- cam subsections ---
-SubsectionWidget::SubsectionWidget(QWidget *parent) : QWidget(parent) {
+SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
+    this->id = id;
     container = new QWidget(this);
     layout = new QVBoxLayout();
     dropdowns = new QHBoxLayout();
@@ -234,11 +235,14 @@ SubsectionWidget::SubsectionWidget(QWidget *parent) : QWidget(parent) {
     layout->setContentsMargins(0, 0, 0, 0);
     container->setLayout(layout);
     container->setStyleSheet("border: 0.5px solid gray;");
-    connect(camera_dropdown, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index){
+    filters.none.store(true);
+    connect(camera_dropdown,  &QComboBox::currentIndexChanged, this, [this](int index){
         cam_id = index - 1;
-        if(index <= 0) cameraView->setPixmap(QPixmap("../../assets/404.png").scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
+        emit selectionChanged();
+        if(index == 0){
+            this->updateFrame(cv::imread("../../assets/404.png"));
+        }
     });
-    connect(camera_dropdown, &QComboBox::currentIndexChanged, this, [this](){ emit selectionChanged(); });
     connect(filter_dropdown, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index){
         if(camera_dropdown->currentIndex() == 0){
             filter_dropdown->blockSignals(true);
@@ -259,8 +263,11 @@ SubsectionWidget::SubsectionWidget(QWidget *parent) : QWidget(parent) {
     is_cv_running.store(true);
     cv_thread = std::thread([this](){
         while(is_cv_running.load()){
-            if(filters.none.load())
+            if(filters.none.load()){
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                continue;
+            }
+            auto start = std::chrono::high_resolution_clock::now();
             if(filters.is_qr_active.load()){
                 std::string decodedText;
                 std::vector<cv::Point> points;
@@ -304,15 +311,12 @@ SubsectionWidget::SubsectionWidget(QWidget *parent) : QWidget(parent) {
                     }
                     frame = latest_frame;
                 }
-                auto start = std::chrono::high_resolution_clock::now();
                 if(filters.is_shape1_active.load())
                     result = this->detectShapeHough(frame);
                 else if(filters.is_shape2_active.load())
                     result = this->detectShapeContours(frame);
                 else if(filters.is_shape3_active.load())
                     result = this->detectShapeHybrid(frame);
-                auto end = std::chrono::high_resolution_clock::now();
-                qDebug() << std::chrono::duration_cast<std::chrono::milliseconds>(end-start);
                 std::lock_guard<std::mutex> lock(filter_mutex);
                 filter_frame = result;
             }
@@ -321,9 +325,23 @@ SubsectionWidget::SubsectionWidget(QWidget *parent) : QWidget(parent) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             }
             else if(filters.is_hazmat_active.load()){
-                // implementation missing
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                cv::Mat frame;
+                {
+                    std::unique_lock<std::mutex> lock(frame_mutex);
+                    if(latest_frame.empty()){
+                        qDebug() << "empty frame on filter";
+                        lock.unlock();
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                        continue;
+                    }
+                    frame = latest_frame;
+                }
+
+                std::lock_guard<std::mutex> lock(filter_mutex);
+                filter_frame = frame;
             }
+            auto end = std::chrono::high_resolution_clock::now();
+            qDebug() << "filter: " << std::chrono::duration_cast<std::chrono::milliseconds>(end-start).count() << " ms";
         }
     });
     connect(this, &SubsectionWidget::frameReady, this, [this](QImage image){
@@ -335,7 +353,7 @@ SubsectionWidget::SubsectionWidget(QWidget *parent) : QWidget(parent) {
 }
 
 SubsectionWidget::~SubsectionWidget(){
-    qDebug() << "closing subsection";
+    emit destructorCalled(id);
     filters.none.store(true);
     is_cv_running.store(false);
     if(cv_thread.joinable()) cv_thread.join();
@@ -416,14 +434,6 @@ void SubsectionWidget::mousePressEvent(QMouseEvent *event) {
     QWidget::mousePressEvent(event);
 }
 
-void SubsectionWidget::setFullScreenMode(bool fullScreen) {
-    this->fullScreen = fullScreen;
-}
-
-std::pair<int, QString> SubsectionWidget::getCurrentSelection()  {
-    return std::make_pair(cam_id, camera_dropdown->currentText());
-}
-
 cv::Mat SubsectionWidget::detectShapeHybrid(cv::Mat input_frame){
     cv::Mat frame = input_frame, gray_frame, thresh_frame;
     std::vector<std::vector<cv::Point>> sector_contours, contours_copy;
@@ -431,7 +441,10 @@ cv::Mat SubsectionWidget::detectShapeHybrid(cv::Mat input_frame){
 
     cv::threshold(gray_frame, thresh_frame, 100, 255, cv::THRESH_BINARY_INV);
     //std::vector<cv::Vec4i> hierarchy;
+    auto start = std::chrono::high_resolution_clock::now();
     cv::findContours(thresh_frame, sector_contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    auto end = std::chrono::high_resolution_clock::now();
+    qDebug() << "first contours: " << std::chrono::duration_cast<std::chrono::milliseconds>(end-start).count();
     //cv::findContours(thresh_frame, contours_copy, hierarchy, cv::RETR_CCOMP, cv::CHAIN_APPROX_SIMPLE);
 
     /*
@@ -466,7 +479,6 @@ cv::Mat SubsectionWidget::detectShapeHybrid(cv::Mat input_frame){
         qDebug() << "no task sector";
         return cv::Mat();
     }
-    qDebug() << "largest area: " << area;
     cv::rectangle(frame, task_sector, cv::Scalar(0, 255, 255), 2);
     cv::Mat final = gray_frame(task_sector);
 
@@ -475,7 +487,12 @@ cv::Mat SubsectionWidget::detectShapeHybrid(cv::Mat input_frame){
     //cv::Mat mask = cv::Mat::ones(task_mat.size(), CV_8UC1) * 255;
 
     std::vector<cv::Vec3f> circles;
+
+    start = std::chrono::high_resolution_clock::now();
     cv::HoughCircles(final, circles, cv::HOUGH_GRADIENT, 1, final.rows/8, 100, 50, final.rows/8, final.rows/3);
+    end = std::chrono::high_resolution_clock::now();
+    qDebug() << "circles: " << std::chrono::duration_cast<std::chrono::milliseconds>(end-start).count();
+
     cv::Mat mask = cv::Mat::ones(final.size(), CV_8UC1) * 255;
 
     //qDebug() << "circles: " << circles.size();
@@ -537,7 +554,10 @@ cv::Mat SubsectionWidget::detectShapeHybrid(cv::Mat input_frame){
     cv::Rect bounding_box2 = cv::boundingRect(mask_roi);
     cv::Mat finalfinal = roi(bounding_box2);
     cv::threshold(roi, ahorasi, 200, 255, cv::THRESH_BINARY);
+    start = std::chrono::high_resolution_clock::now();
     cv::findContours(ahorasi, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    end = std::chrono::high_resolution_clock::now();
+    qDebug() << "second contuors: " << std::chrono::duration_cast<std::chrono::milliseconds>(end-start).count();
 
     std::vector<std::vector<cv::Point>> filtered_contours;
     for (const auto& contour : contours) {
@@ -602,12 +622,61 @@ cv::Mat SubsectionWidget::detectShapeHybrid(cv::Mat input_frame){
 }
 
 cv::Mat SubsectionWidget::detectShapeContours(const cv::Mat& input_frame){
+
+    cv::Mat gray, thresh, frame = input_frame.clone();
+
+    cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+    cv::threshold(gray, thresh, 240, 255, cv::THRESH_BINARY);
+
+    int morph_size = 3;
+    cv::Mat element = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(2 * morph_size + 1, 2 * morph_size + 1), cv::Point(morph_size, morph_size));
+
+    cv::erode(thresh, thresh, element);
+    //cv::erode(thresh, thresh, element);
+    cv::morphologyEx(thresh, thresh, cv::MORPH_CLOSE, element);
+    return thresh;
+
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(thresh, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    double min_dis = DBL_MAX;
+    cv::Rect actual_box;
+    for(int i = 0; i < contours.size(); i++){
+        cv::Rect box = cv::boundingRect(contours[i]);
+        double aspectRatio = (double)box.width / box.height;
+        std::vector<cv::Point> hull;
+        cv::convexHull(contours[i], hull);
+        double hullArea = cv::contourArea(hull);
+        double solidity = cv::contourArea(contours[i]) / hullArea;
+        double dis = box.x*box.x + (frame.rows-box.y)*(frame.rows-box.y);
+        if(aspectRatio > 0.8 && aspectRatio < 1.2 && solidity > 0.8 && dis < min_dis){
+            min_dis = dis;
+            box.width += 10;
+            box.height += 10;
+            box.x -= 5;
+            box.y -= 5;
+            actual_box = box;
+        }
+        cv::rectangle(frame, box, cv::Scalar(0, 0, 255), 2);
+        /*
+    if(aspectRatio > 0.8 && aspectRatio < 1.2 && solidity > 0.8)
+        cv::rectangle(frame, box, cv::Scalar(255, 0, 0), 2);
+    else
+        cv::rectangle(frame, box, cv::Scalar(0, 0, 255), 2);
+    */
+    }
+    cv::rectangle(frame, actual_box, cv::Scalar(0, 255, 0), 2);
+
+    return frame;
+
+    /*
     cv::Mat frame = input_frame.clone();
     cv::Mat gray_quadrant;
     cv::cvtColor(input_frame, gray_quadrant, cv::COLOR_BGR2GRAY);
     cv::Mat thresh_quadrant;
     cv::threshold(gray_quadrant, thresh_quadrant, 50, 255, cv::THRESH_BINARY_INV);
     std::vector<std::vector<cv::Point>> quadrant_contours;
+
+    return thresh_quadrant;
     cv::findContours(thresh_quadrant, quadrant_contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
     cv::Rect roi;
@@ -698,189 +767,110 @@ cv::Mat SubsectionWidget::detectShapeContours(const cv::Mat& input_frame){
         }
     }
     return frame;
+    */
 }
 
-cv::Mat SubsectionWidget::detectShapeHough(cv::Mat input_frame){
-    cv::Mat frame = input_frame, gray_frame, thresh_frame;
-    std::vector<std::vector<cv::Point>> sector_contours;
-    cv::cvtColor(frame, gray_frame, cv::COLOR_BGR2GRAY);
-    /*
-    cv::threshold(gray_frame, thresh_frame, 50, 255, cv::THRESH_BINARY_INV);
-    cv::findContours(thresh_frame, sector_contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    if(sector_contours.empty()){
-        qDebug() << "no contours";
-        return cv::Mat();
-    }
-    */
+cv::Mat SubsectionWidget::detectShapeHough(cv::Mat frame){
+    cv::Mat gray_frame, thresh_frame;
+    std::vector<std::vector<cv::Point>> shape_contours, filtered_contours;
+    std::vector<cv::Vec3f> ext_circles, inner_circles;
 
-    std::vector<cv::Vec3f> circles2;
-    //cv::Mat temp = gray_frame.clone();
-    //cv::GaussianBlur(gray_frame, temp, cv::Size(9, 9), 2, 2);
-    cv::HoughCircles(gray_frame, circles2, cv::HOUGH_GRADIENT, 1, gray_frame.rows/8, 100, 50, gray_frame.rows/8, gray_frame.rows/4);
+    cv::cvtColor(frame, gray_frame, cv::COLOR_BGR2GRAY);
+    cv::Mat temp;
+    cv::resize(gray_frame, temp, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
+    cv::HoughCircles(temp, ext_circles, cv::HOUGH_GRADIENT, 1, temp.rows/8, 100, 50, temp.rows/8, temp.rows/4);
+
     double min_dis = DBL_MAX;
-    cv::Vec3f circle_sector;
-    for(int i = 0; i < circles2.size(); i++){
-        cv::Point center(cvRound(circles2[i][0]), cvRound(circles2[i][1]));
-        int radius = cvRound(circles2[i][2]);
+    cv::Vec3f ext_sector;
+    for(int i = 0; i < ext_circles.size(); i++){
+        ext_circles[i][0] *= 4.0;
+        ext_circles[i][1] *= 4.0;
+        ext_circles[i][2] *= 4.0;
+        cv::Point center(cvRound(ext_circles[i][0]), cvRound(ext_circles[i][1]));
+        int radius = cvRound(ext_circles[i][2]);
         double dis = center.x*center.x + (frame.rows - center.y)*(frame.rows - center.y);
-        //cv::rectangle(thresh_frame, temp, cv::Scalar(255, 0, 255), 2);
         if(dis < min_dis){
             min_dis = dis;
-            circle_sector = circles2[i];
+            ext_sector = ext_circles[i];
         }
     }
     if(min_dis == DBL_MAX){
         qDebug() << "no outer circle";
         return cv::Mat();
     }
-    //cv::circle(frame, cv::Point(cvRound(circle_sector[0]), cvRound(circle_sector[1])), cvRound(circle_sector[2]), cv::Scalar(255, 0, 0), 2);
-    cv::Mat mask2 = cv::Mat::zeros(frame.size(), CV_8UC1), res;
-    cv::circle(mask2, cv::Point(cvRound(circle_sector[0]), cvRound(circle_sector[1])), cvRound(circle_sector[2]), cv::Scalar(255), -1);
-    gray_frame.copyTo(res, mask2);
-    cv::Rect bounding_box = cv::boundingRect(mask2);
-    cv::Mat final = res(bounding_box);
-    if(final.empty() || final.rows < 8 || final.cols < 8){
+
+    cv::Mat ext_mask = cv::Mat::zeros(frame.size(), CV_8UC1), frame_roi;
+    cv::circle(ext_mask, cv::Point(cvRound(ext_sector[0]), cvRound(ext_sector[1])), cvRound(ext_sector[2]), cv::Scalar(255), -1);
+    gray_frame.copyTo(temp, ext_mask);
+    cv::Rect ext_box = cv::boundingRect(ext_mask);
+    frame_roi = temp(ext_box);
+    if(frame_roi.empty() || frame_roi.rows < 8 || frame_roi.cols < 8){
         qDebug() << "empty final";
         return cv::Mat();
     }
 
-    /*
-    cv::Rect task_sector;
-    min_dis = DBL_MAX;
-    for(int i = 0; i < sector_contours.size(); i++){
-        double area = cv::contourArea(sector_contours[i]);
-        if(area < 1000) continue;
-        cv::Rect temp = cv::boundingRect(sector_contours[i]);
-        double dis = temp.x*temp.x + (frame.rows - temp.y)*(frame.rows - temp.y);
-        cv::rectangle(thresh_frame, temp, cv::Scalar(255, 0, 255), 2);
-        if(dis < min_dis){
-            min_dis = dis;
-            task_sector = temp;
-        }
+    cv::HoughCircles(frame_roi, ext_circles, cv::HOUGH_GRADIENT, 1, frame_roi.rows/8, 100, 50, frame_roi.rows/8, frame_roi.rows/3);
+    cv::Mat roi_mask = cv::Mat::ones(frame_roi.size(), CV_8UC1) * 255;
+    for(int i = 0; i < ext_circles.size(); i++){
+        cv::Point center(cvRound(ext_circles[i][0]), cvRound(ext_circles[i][1]));
+        int radius = cvRound(ext_circles[i][2]) + 5;
+        cv::circle(roi_mask, center, radius, cv::Scalar(0), 8);
+        center.x += ext_box.x;
+        center.y += ext_box.y;
+        //cv::circle(frame, center, radius, cv::Scalar(255, 0, 0), 2);
     }
-    //cv::imshow("test", thresh_frame);
-    if(min_dis == DBL_MAX){
-        qDebug() << "no task sector";
-        return cv::Mat();
-    }
-    cv::rectangle(frame, task_sector, cv::Scalar(0, 255, 255), 2);
-
-    cv::Mat task_mat = gray_frame(task_sector);
-    cv::Mat task_thresh, morphed;
-    cv::threshold(task_mat, task_thresh, 200, 255, cv::THRESH_BINARY);
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
-    cv::morphologyEx(task_thresh, morphed, cv::MORPH_OPEN, kernel);
-    */
-    //cv::HoughCircles(task_mat, circles, cv::HOUGH_GRADIENT, 1, task_mat.rows/8, 100, 50, task_mat.rows/8, task_mat.rows/3);
-    //cv::Mat mask = cv::Mat::ones(task_mat.size(), CV_8UC1) * 255;
-
-    std::vector<cv::Vec3f> circles;
-    //cv::Mat temp2 = final.clone();
-    //cv::GaussianBlur(final, temp2, cv::Size(9, 9), 2, 2);
-    cv::HoughCircles(final, circles, cv::HOUGH_GRADIENT, 1, final.rows/8, 100, 50, final.rows/8, final.rows/3);
-    cv::Mat mask = cv::Mat::ones(final.size(), CV_8UC1) * 255;
-
-    //qDebug() << "circles: " << circles.size();
-    for(int i = 0; i < circles.size(); i++){
-        cv::Point center(cvRound(circles[i][0]), cvRound(circles[i][1]));
-        int radius = cvRound(circles[i][2]) + 5;
-        cv::circle(mask, center, radius, cv::Scalar(0), 8);
-        //center.x += task_sector.x;
-        //center.y += task_sector.y;
-        center.x += bounding_box.x;
-        center.y += bounding_box.y;
-        cv::circle(frame, center, radius, cv::Scalar(255, 0, 0), 2);
-    }
-
-    std::vector<std::vector<cv::Point>> contours;
-
-    /*
-    cv::Mat masked;
-    cv::bitwise_and(morphed, mask, masked);
-    mask = cv::Mat::zeros(task_thresh.size(), CV_8UC1);
-    if(circles.size() == 0){
-        cv::imshow("circles", task_mat);
-        qDebug() << "no circles found";
-        return cv::Mat();
-    }
-    cv::circle(mask, cv::Point(cvRound(circles[0][0]), cvRound(circles[0][1])), cvRound(circles[0][2])-15, cv::Scalar(255), -1);
-    cv::Mat result;
-    task_thresh.copyTo(result, mask);
-    cv::imshow("please", result);
-    cv::findContours(masked, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    */
-    if(circles.empty()){
+    if(ext_circles.empty()){
         qDebug() << "no inner circles";
         return cv::Mat();
     }
+    else if(ext_circles.size() > 1)
+        qWarning() << "Inner circle conflict";
 
-    cv::Mat mask_roi = cv::Mat::zeros(final.size(), CV_8UC1), roi, ahorasi;
-    // FIX THIS SHIT BRUH;
-    cv::circle(mask_roi, cv::Point(cvRound(circles[0][0]), cvRound(circles[0][1])), cvRound(circles[0][2])-10, cv::Scalar(255), -1);
-    final.copyTo(roi, mask_roi);
-    cv::Rect bounding_box2 = cv::boundingRect(mask_roi);
-    cv::Mat finalfinal = roi(bounding_box2);
-    cv::threshold(roi, ahorasi, 200, 255, cv::THRESH_BINARY);
-    cv::findContours(ahorasi, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    cv::Mat mask_roi = cv::Mat::zeros(frame_roi.size(), CV_8UC1), final, final_thresh;
+    // FIX THIS
+    cv::circle(mask_roi, cv::Point(cvRound(ext_circles[0][0]), cvRound(ext_circles[0][1])), cvRound(ext_circles[0][2])-10, cv::Scalar(255), -1);
+    frame_roi.copyTo(final, mask_roi);
+    cv::threshold(final, final_thresh, 200, 255, cv::THRESH_BINARY);
 
-    std::vector<std::vector<cv::Point>> filtered_contours;
-    for (const auto& contour : contours) {
-        double area = cv::contourArea(contour);
+    cv::findContours(final_thresh, shape_contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    for (int i = 0; i < shape_contours.size(); i++) {
+        double area = cv::contourArea(shape_contours[i]);
         if (area <= 10.0) continue;
-
-        cv::Rect bound_rect = cv::boundingRect(contour);
-        double aspect_ratio = static_cast<double>(bound_rect.width) / bound_rect.height;
-
+        cv::Rect bound_rect = cv::boundingRect(shape_contours[i]);
         std::vector<cv::Point> hull;
-        cv::convexHull(contour, hull);
-        double hull_area = cv::contourArea(hull);
-        double solidity = area / hull_area;
-
+        double aspect_ratio = static_cast<double>(bound_rect.width) / bound_rect.height;
+        cv::convexHull(shape_contours[i], hull);
+        double solidity = area / cv::contourArea(hull);
         if (aspect_ratio > 0.5 && aspect_ratio < 1.5 && solidity > 0.5) {
-            filtered_contours.push_back(contour);
+            filtered_contours.push_back(shape_contours[i]);
         }
     }
 
     if (!filtered_contours.empty()) {
-        //cv::Point center(task_mat.cols / 2, task_mat.rows / 2);
-        cv::Point center(ahorasi.cols / 2, ahorasi.rows / 2);
+        cv::Point center(final.cols / 2, final.rows / 2);
         double min_distance = DBL_MAX;
         int best_contour_idx = -1;
-
-        for (int i = 0; i < filtered_contours.size(); ++i) {
+        for(int i = 0; i < filtered_contours.size(); ++i) {
             cv::Moments m = cv::moments(filtered_contours[i]);
-            if (m.m00 != 0) {
+            if(m.m00 != 0) {
                 cv::Point center_of_mass(m.m10 / m.m00, m.m01 / m.m00);
-                center.x += bounding_box.x;
-                center.y += bounding_box.y;
+                center.x += ext_box.x;
+                center.y += ext_box.y;
                 double distance = cv::norm(center_of_mass - center);
                 if (distance < min_distance){
                     min_distance = distance;
                     best_contour_idx = i;
                 }
-                /*
-                cv::Rect bounding_box3 = cv::boundingRect(filtered_contours[i]);
-                bounding_box3.x += bounding_box.x - 10;
-                bounding_box3.y += bounding_box.y - 10;
-                bounding_box3.width += 20;
-                bounding_box3.height += 20;
-                cv::rectangle(frame, bounding_box3, cv::Scalar(255, 255, 0), 2);
-                */
-
             }
         }
-
         if (best_contour_idx >= 0) {
-            cv::Rect bounding_box3 = cv::boundingRect(filtered_contours[best_contour_idx]);
-            //bounding_box.x += task_sector.x - 10;
-            //bounding_box.y += task_sector.y - 10;
-            bounding_box3.x += bounding_box.x - 10;
-            bounding_box3.y += bounding_box.y - 10;
-            bounding_box3.width += 20;
-            bounding_box3.height += 20;
-            cv::rectangle(frame, bounding_box3, cv::Scalar(0, 255, 0), 2);
+            cv::Rect box = cv::boundingRect(filtered_contours[best_contour_idx]);
+            box.x += ext_box.x - 10;
+            box.y += ext_box.y - 10;
+            box.width += 20;
+            box.height += 20;
+            cv::rectangle(frame, box, cv::Scalar(0, 255, 0), 2);
         }
-
     }
     return frame;
 }
@@ -900,10 +890,11 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     this->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     this->setFixedSize(1280, 720);
     is_fullscreen = false;
+    int id = 0;
     for(int i = 0; i < 2; i++) {
         for(int j = 0; j < 2; j++){
             cam_map.insert({subsections.size(), -1});
-            SubsectionWidget *widget = new SubsectionWidget(this);
+            SubsectionWidget *widget = new SubsectionWidget(id++, this);
             connect(widget, &SubsectionWidget::subsectionClicked, this, [this](SubsectionWidget* clicked_widget){
                 if(!is_fullscreen){
                     for(int k = 0; k < subsections.size(); k++){
@@ -942,6 +933,7 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
                 }
                 emit selectionChanged(cam_map);
             });
+            connect(widget, &SubsectionWidget::destructorCalled, this, [this](int id){ emit destructorCalled(id); });
             subsections.push_back(widget);
             left_layout->addWidget(widget, i, j);
         }
@@ -1009,6 +1001,8 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
         speech_label->setText("No data");
         magnetometer_label->setText("No data");
     });
+
+    // 3D MODEL VIEWER
     //model = new ModelWidget(this);
     //right_layout->addWidget(model);
     right_layout->addLayout(dashboard_layout);
@@ -1025,19 +1019,13 @@ void MainWindow::setCamPorts(int num_cams){
 void MainWindow::updateFrame(int id, std::vector<unsigned char> data){
     cv::Mat frame = cv::imdecode(data, cv::IMREAD_COLOR);
     cv::cvtColor(frame, frame, cv::COLOR_BGR2RGB);
-    int sub_id = 0;
+    int sub_id = -1;
     for(auto it = cam_map.begin(); it != cam_map.end(); it++){
         if(it->second == id)
             sub_id = it->first;
     }
-    subsections[sub_id]->updateFrame(frame);
-}
-
-MainWindow::~MainWindow(){
-    qInfo() << "Closing main window...";
-    for(int i = 0; i < subsections.size(); i++){
-        subsections[i]->destroy();
-    }
+    if(sub_id != -1)
+        subsections[sub_id]->updateFrame(frame);
 }
 
 template<typename T> void MainWindow::updateDashbord(int index, T data){
@@ -1065,14 +1053,16 @@ template<typename T> void MainWindow::updateDashbord(int index, T data){
 void MainWindow::closeEvent(QCloseEvent* event) {
     emit windowClosing();
     qInfo() << "Closing main window...";
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     for(int i = 0; i < subsections.size(); i++){
         subsections[i]->destroy();
     }
     event->accept();
+    qInfo() << "Bye";
 }
 
 void MainWindow::updateState(std::vector<float> data){
-
+    // WIP
     /*
     for(int i = 0; i < data.size(); i++){
         qDebug() << "ros2 [" << i << "]: " << data[i];
@@ -1292,6 +1282,68 @@ RTPStreamHandler::~RTPStreamHandler(){
 }
 
 void RTPStreamHandler::recvPacket(){
+    std::vector<std::vector<char>> fragments;
+    std::vector<char> packet, buffer(MAX_PACKET_SIZE);
+    int i = 0, num_fragments = -1, ssrc = -1;
+    do{
+        int bytes_received = recvfrom(recv_socket, buffer.data(), MAX_PACKET_SIZE, 0, (struct sockaddr*)&recv_socket_address, &socket_address_size);
+        qDebug() << "bytes received: " << bytes_received;
+        if(bytes_received == SOCKET_ERROR){
+            int error = WSAGetLastError();
+            if(error != 10004)
+                qCritical() << "Packet recv failed. Winsock error: " << error;
+            return;
+        }
+        else if (bytes_received < sizeof(RTPHeader)) {
+            qCritical() << "Received incomplete RTP header.";
+            return;
+        }
+
+        RTPHeader* header = new RTPHeader;
+        std::memcpy(header, buffer.data(), sizeof(RTPHeader));
+        packet.resize(bytes_received - sizeof(RTPHeader));
+        std::memcpy(packet.data(), buffer.data() + sizeof(RTPHeader), bytes_received - sizeof(RTPHeader));
+
+        if((header->seq & FRAGMENTATION_FLAG) == 0) break;
+        else if(i == 0){
+            num_fragments = header->m;
+            ssrc = header->ssrc;
+            fragments.resize(num_fragments);
+        }
+        else if(ssrc != header->ssrc){
+            qWarning() << "Packet fragmentation error. Previous packet dropped";
+            i = 0;
+            fragments.clear();
+            num_fragments = header->m;
+            ssrc = header->ssrc;
+            fragments.resize(num_fragments);
+        }
+
+        fragments[header->seq & ~FRAGMENTATION_FLAG] = packet;
+        if(i == num_fragments - 1){
+            packet.clear();
+            for(int i = 0; i < num_fragments; i++){
+                packet.insert(packet.end(), fragments[i].begin(), fragments[i].end());
+            }
+        }
+
+        i++;
+    } while(i < num_fragments);
+
+    if(stream->payload_type == PayloadType::ROS2_ARRAY && floatCallback){
+        std::vector<float> data(packet.size() / sizeof(float));
+        std::memcpy(data.data(), packet.data(), packet.size());
+        floatCallback(data);
+    }
+    else if((stream->payload_type == PayloadType::VIDEO_MJPEG || stream->payload_type == PayloadType::AUDIO_PCM) && ucharCallback){
+        std::vector<uchar> data(packet.size());
+        std::memcpy(data.data(), packet.data(), packet.size());
+        ucharCallback(data);
+    }
+    else
+        qCritical() << "Payload / Callback error on packet recv";
+
+    /*
     std::vector<char> packet(MAX_PACKET_SIZE);
     int bytes_received = recvfrom(recv_socket, packet.data(), packet.size(), 0, (struct sockaddr*)&recv_socket_address, &socket_address_size);
     if(bytes_received == SOCKET_ERROR){
@@ -1318,9 +1370,12 @@ void RTPStreamHandler::recvPacket(){
     }
     else
         qCritical() << "Payload / Callback error on packet recv";
+    */
 }
 
-void RTPStreamHandler::sendPacket(std::vector<int> data){
+/*
+template <typename T> void RTPStreamHandler::sendPacket(std::vector<T> data){
+
     // --- RTP header info ---
     RTPHeader header;
     header.version = 2;
@@ -1329,7 +1384,7 @@ void RTPStreamHandler::sendPacket(std::vector<int> data){
     header.cc = 0;
     header.m = 1;
     header.pt = static_cast<uint8_t>(stream->payload_type);
-    header.seq_num = stream->seq_num++;
+    header.seq = stream->seq_num++;
     header.timestamp = stream->timestamp;
     header.ssrc = stream->ssrc;
     stream->timestamp += 100; // fix this please
@@ -1337,17 +1392,48 @@ void RTPStreamHandler::sendPacket(std::vector<int> data){
     std::vector<char> packet((data.size() * sizeof(int)) + sizeof(RTPHeader));
     std::memcpy(packet.data(), &header, sizeof(RTPHeader));
     std::memcpy(packet.data() + sizeof(RTPHeader), data.data(), data.size() * sizeof(int));
-    // --- Simulated network degradation (lowkey trash implementation but idc) ---
-    /*
-        this_thread::sleep_for(std::chrono::milliseconds(rand() % 150));    // ~100ms latency
-        if(rand() % 10 == 0) return;    // ~10% packet loss
-    */
     if(sendto(send_socket, packet.data(), packet.size(), 0, (struct sockaddr*)&send_socket_address, socket_address_size) == SOCKET_ERROR)
         qWarning() << "Packet send failed. Winsock error: " << WSAGetLastError();
+
+        // --- Initial settings ---
+        int max_size = MAX_UDP_PACKET_SIZE - sizeof(RTPHeader);
+        int num_fragments = ((data.size()*sizeof(T)) + max_size - 1) / max_size;
+        // -- (Pseudo)random ssrc --
+        thread_local uint16_t ssrc = 1;
+        ssrc ^= ssrc << 7;
+        ssrc ^= ssrc >> 9;
+        ssrc ^= ssrc << 8;
+
+        // --- Fragment setup ---
+        for(int i = 0; i < num_fragments; i++){
+            // -- RTP header info --
+            RTPHeader header;
+            header.version = 2;
+            header.p = 0;
+            header.x = 0;
+            header.cc = 0;
+            header.m = (uint16_t)num_fragments;
+            header.pt = 0;
+            header.timestamp = 0;
+            header.ssrc = ssrc;
+            header.seq = (uint16_t)i;
+            if(num_fragments > 1)
+                header.seq |= FRAGMENTATION_FLAG;
+            // -- Merge header + packet --
+            int current_size = (max_size < ((data.size()*sizeof(T)) - (i*max_size)) ? max_size : (data.size()*sizeof(T)) - (i*max_size));
+            std::vector<char> packet(current_size + sizeof(RTPHeader));
+            std::memcpy(packet.data(), &header, sizeof(RTPHeader));
+            std::memcpy(packet.data() + sizeof(RTPHeader), data.data() + (i*max_size), current_size);
+
+            if(sendto(send_socket, (const char*)packet.data(), packet.size(), 0, (struct sockaddr*)&send_socket_address, socket_address_size) == SOCKET_ERROR){
+                qWarning() << "Packet send failed on fragment " << i << ". Winsock error: " << WSAGetLastError();
+            }
+        }
 }
+*/
 
 AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
-    qInfo() << "Starting program...";
+    qInfo() << "Starting GUI...";
     window = new MainWindow;
     window->setWindowTitle("GUI - alpha");
     window->resize(1280, 720);
@@ -1391,7 +1477,7 @@ AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
 
 AppHandler::~AppHandler(){
     qInfo() << "Closing program...";
-    base_socket->target_socket->sendPacket({0, -1});
+    base_socket->target_socket->sendPacket(std::vector<int>{0, -1});
     base_socket->is_recv_running.store(false);
     base_socket->is_send_running.store(false);
     base_socket->target_socket->destroy();
@@ -1399,7 +1485,7 @@ AppHandler::~AppHandler(){
         base_socket->send_thread.join();
     if(base_socket->recv_thread.joinable())
         base_socket->recv_thread.join();
-    qInfo() << "Base stream destroyed";
+    qInfo() << "Base channel closed";
     audio_socket->is_recv_running.store(false);
     audio_socket->is_send_running.store(false);
     audio_socket->target_socket->destroy();
@@ -1411,7 +1497,7 @@ AppHandler::~AppHandler(){
     Pa_CloseStream(stream);
     Pa_Terminate();
     opus_decoder_destroy(opus_decoder);
-    qInfo() << "Audio stream destroyed";
+    qInfo() << "Audio channel closed";
     for(int i = 0; i < video_sockets.size(); i++){
         video_sockets[i]->is_recv_running.store(false);
         video_sockets[i]->is_send_running.store(false);
@@ -1421,9 +1507,8 @@ AppHandler::~AppHandler(){
         if(video_sockets[i]->send_thread.joinable())
             video_sockets[i]->send_thread.join();
     }
-    qInfo() << "Video streams destroyed";
+    qInfo() << "Video channels closed";
     WSACleanup();
-    qInfo() << "Bye";
 }
 
 void AppHandler::init(){
@@ -1431,12 +1516,12 @@ void AppHandler::init(){
     int num_cams = 0;
 
     // handshake
-    base_socket->target_socket->sendPacket({0, 0});
+    base_socket->target_socket->sendPacket(std::vector<int>{0, 0});
     base_socket->target_socket->recvPacket();
     {
         std::lock_guard<std::mutex> lock(base_socket->data_mutex);
-        if(base_socket->float_data.size() == 0){
-            qCritical() << "Base handshake failed.";
+        if(base_socket->float_data.empty() || base_socket->float_data[0] < 0){
+            qCritical() << "Base handshake failed";
             return;
         }
         num_cams = (int)base_socket->float_data[0];
@@ -1461,7 +1546,7 @@ void AppHandler::init(){
         });
         video_sockets[i]->send_thread = std::thread([i, this](){
             while(video_sockets[i]->is_send_running.load()){
-                video_sockets[i]->target_socket->sendPacket({0, (int)video_sockets[i]->is_active.load()});
+                video_sockets[i]->target_socket->sendPacket(std::vector<int>{0, (int)video_sockets[i]->is_active.load()});
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
         });
@@ -1474,7 +1559,7 @@ void AppHandler::init(){
     });
     audio_socket->send_thread = std::thread([this](){
         while(audio_socket->is_send_running.load()){
-            audio_socket->target_socket->sendPacket({0, (int)is_audio_active.load()});
+            audio_socket->target_socket->sendPacket(std::vector<int>{0, (int)is_audio_active.load()});
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     });

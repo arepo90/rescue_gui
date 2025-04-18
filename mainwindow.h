@@ -32,6 +32,7 @@
 
 #include <portaudio.h>
 #include <opencv2/opencv.hpp>
+#include <opencv2/dnn.hpp>
 #include <opus/opus.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -42,6 +43,7 @@
 #include <mutex>
 #include <cstdint>
 #include <Xinput.h>
+#include <windows.h>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -49,6 +51,9 @@
 #define SAMPLE_RATE 48000
 #define MAX_PACKET_SIZE 65536
 #define CLIENT_IP "127.0.0.1"
+#define FRAGMENTATION_FLAG 0x8000
+#define MAX_UDP_PACKET_SIZE 65507   // 65507 bytes ~= 65.5 kB
+#define FRAGMENTATION_FLAG 0x8000
 
 enum PACKET_TYPE{ SETUP = 0, AUDIO = 1, VIDEO = 2 };
 
@@ -57,11 +62,11 @@ struct RTPHeader {
     uint16_t x:1;
     uint16_t p:1;
     uint16_t version:2;
-    uint16_t pt:7;
-    uint16_t m:1;
-    uint16_t seq_num;
-    uint32_t timestamp;
-    uint32_t ssrc;
+    uint16_t pt:1;
+    uint16_t m;
+    uint16_t seq;
+    uint16_t timestamp;
+    uint16_t ssrc;
 };
 
 enum class PayloadType : uint8_t{
@@ -94,13 +99,13 @@ private:
 class SubsectionWidget : public QWidget{
     Q_OBJECT
 public:
-    explicit SubsectionWidget(QWidget *parent = nullptr);
+    explicit SubsectionWidget(int id, QWidget *parent = nullptr);
     ~SubsectionWidget();
     void destroy(){ delete this; }
     void setAvailableDevices(int num_cams);
-    void setFullScreenMode(bool fullScreen);
+    void setFullScreenMode(bool fullScreen){ this->fullScreen = fullScreen; }
     void updateAvailableOptions(const QSet<QString> &usedOptions);
-    std::pair<int, QString> getCurrentSelection();
+    std::pair<int, QString> getCurrentSelection(){ return std::make_pair(cam_id, camera_dropdown->currentText()); }
     void updateFrame(cv::Mat frame);
     cv::Mat detectShapeContours(const cv::Mat& input_frame);
     cv::Mat detectShapeHough(cv::Mat input_frame);
@@ -109,6 +114,7 @@ signals:
     void subsectionClicked(SubsectionWidget *widget);
     void selectionChanged();
     void frameReady(QImage image);
+    void destructorCalled(int id);
 protected:
     void mousePressEvent(QMouseEvent *event) override;
 private:
@@ -126,6 +132,7 @@ private:
     QComboBox *camera_dropdown;
     QComboBox *filter_dropdown;
     int cam_id;
+    int id;
     QLabel* cameraView;
     QVBoxLayout* layout;
     QHBoxLayout* dropdowns;
@@ -172,7 +179,42 @@ public:
     void destroy(){ delete this; }
     static int audioCallback(const void* input, void* output, unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags, void* userData);
     int audioProcess(const void* input, void* output, unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags);
-    void sendPacket(std::vector<int> data);
+    template <typename T> void sendPacket(std::vector<T> data){
+        // --- Initial settings ---
+        int max_size = MAX_UDP_PACKET_SIZE - sizeof(RTPHeader);
+        int num_fragments = ((data.size()*sizeof(T)) + max_size - 1) / max_size;
+        // -- (Pseudo)random ssrc --
+        thread_local uint16_t ssrc = 1;
+        ssrc ^= ssrc << 7;
+        ssrc ^= ssrc >> 9;
+        ssrc ^= ssrc << 8;
+
+        // --- Fragment setup ---
+        for(int i = 0; i < num_fragments; i++){
+            // -- RTP header info --
+            RTPHeader header;
+            header.version = 2;
+            header.p = 0;
+            header.x = 0;
+            header.cc = 0;
+            header.m = (uint16_t)num_fragments;
+            header.pt = 0;
+            header.timestamp = 0;
+            header.ssrc = ssrc;
+            header.seq = (uint16_t)i;
+            if(num_fragments > 1)
+                header.seq |= FRAGMENTATION_FLAG;
+            // -- Merge header + packet --
+            int current_size = (max_size < ((data.size()*sizeof(T)) - (i*max_size)) ? max_size : (data.size()*sizeof(T)) - (i*max_size));
+            std::vector<char> packet(current_size + sizeof(RTPHeader));
+            std::memcpy(packet.data(), &header, sizeof(RTPHeader));
+            std::memcpy(packet.data() + sizeof(RTPHeader), data.data() + (i*max_size), current_size);
+
+            if(sendto(send_socket, (const char*)packet.data(), packet.size(), 0, (struct sockaddr*)&send_socket_address, socket_address_size) == SOCKET_ERROR){
+                qWarning() << "Packet send failed on fragment " << i << ". Winsock error: " << WSAGetLastError();
+            }
+        }
+    }
     void recvPacket();
 private:
     struct Stream{
@@ -225,7 +267,6 @@ class MainWindow : public QWidget{
     Q_OBJECT
 public:
     explicit MainWindow(QWidget *parent = nullptr);
-    ~MainWindow();
     void updateState(std::vector<float> data);
     void updateFrame(int id, std::vector<unsigned char> data);
     void setCamPorts(int num_cams);
@@ -234,6 +275,7 @@ signals:
     void windowClosing();
     void selectionChanged(std::map<int, int> cam_map);
     void buttonChanged(bool is_active);
+    void destructorCalled(int id);
 protected:
     void closeEvent(QCloseEvent *event) override;
 private:

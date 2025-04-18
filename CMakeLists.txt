@@ -33,6 +33,7 @@ find_package(TIFF REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(LibArchive REQUIRED)
 add_definitions(-DHAVE_OPENCV_CUDA=1)
+#find_package(OpenCV REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS
     core
     imgproc

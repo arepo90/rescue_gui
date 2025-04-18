@@ -1,20 +1,25 @@
 /*
-    ROBOTEC 2025
+    ROBOTEC GUI - 2025
 
     DISCLAIMER:
     APP WILL ONLY RUN WITH THE FOLLOWING DEPENDENCIES:
     - QT6 + WIDGETS + 3D + RANDOM STUFF I DONT REMEMBER
-    - OPENCV (binaries)
+    - OPENCV (vcpkg)
     - PORTAUDIO (vcpkg)
     - OPUS (vcpkg)
     - XINPUT (windows sdk)
 
-    MAY OR MAY NOT WORK WITHOUT THEM (you can comment them in CMakeLists.txt and code lines themselves)
+    ----> THE MAIN WINDOW WILL NOT APPEAR UNLESS CONNECTION WITH RELAY PROGRAM IS ESTABLISHED <----
+
+    CHECK CONSOLE OUTPUTS FOR MORE INFO
+    IVE ONLY EVER TESTED THIS IN MY DEVICE, SO IT MAY OR MAY NOT WORK WITH DIFFERENT CONFIGS
 */
 
 #include "mainwindow.h"
 #include <QApplication>
 #include <cstdio>
+
+// WORK IN PROGRESS OK ?😭😭😭😭😭
 
 // --- tests n stuff ---
 /*
@@ -82,39 +87,9 @@ void videoStream() {
     }
 }
 */
-/*
-    WSAData wsaData;
-    WSAStartup(MAKEWORD(2, 2), &wsaData);
-
-    std::thread videoThread = std::thread(videoStream);
-
-    audioSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    audioAddr.sin_family = AF_INET;
-    audioAddr.sin_port = htons(AUDIO_PORT);
-    audioAddr.sin_addr.s_addr = INADDR_ANY;
-    ::bind(audioSocket, (struct sockaddr*)&audioAddr, sizeof(audioAddr));
-
-    int error;
-    opusDecoder = opus_decoder_create(SAMPLE_RATE2, CHANNELS, &error);
-
-    Pa_Initialize();
-    PaStream* stream;
-    Pa_OpenDefaultStream(&stream, 0, 1, paInt16, SAMPLE_RATE2, FRAME_SIZE, audioCallback, &audioSocket);
-    Pa_StartStream(stream);
-
-    QObject::connect(window, &MainWindow::windowClosing, [stream, &videoThread](){
-        Pa_StopStream(stream);
-        Pa_CloseStream(stream);
-        Pa_Terminate();
-        opus_decoder_destroy(opusDecoder);
-        closesocket(audioSocket);
-        closesocket(videoSocket);
-        WSACleanup();
-        videoThread.join();
-    });
-*/
 
 /*
+    // XINPUT TESTS
     controller_socket = new RTPServer(8000, PayloadType::AUDIO_PCM);
     controller = new Controller(1200);
     std::this_thread::sleep_for(std::chrono::seconds(5));
@@ -142,109 +117,11 @@ void videoStream() {
     });
 */
 
-// WORK IN PROGRESS OK ?😭😭😭😭😭
-// 80 420 300 300
 
-ConsoleWindow *console = nullptr;
+//ConsoleWindow *console = nullptr;
 
 /*
-cv::Mat detectShape(const cv::Mat& inputFrame) {
-    cv::Mat frame = inputFrame.clone();
-    int frameHeight = frame.rows;
-    int frameWidth = frame.cols;
-    int quadrantWidth = frameWidth;
-    int quadrantHeight = frameHeight;
-    cv::Mat quadrantROI = inputFrame.clone();
-    cv::Mat grayQuadrant;
-    cv::cvtColor(quadrantROI, grayQuadrant, cv::COLOR_BGR2GRAY);
-    cv::Mat threshQuadrant;
-    cv::threshold(grayQuadrant, threshQuadrant, 50, 255, cv::THRESH_BINARY_INV);
-    std::vector<std::vector<cv::Point>> quadrantContours;
-    cv::findContours(threshQuadrant, quadrantContours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    cv::Rect roi;
-    bool roiFound = false;
-    double dists = DBL_MAX;
-    for(const auto& contour : quadrantContours) {
-        double area = cv::contourArea(contour);
-        if(area < 1000) continue;
-        cv::Rect temp = cv::boundingRect(contour);
-        double dis = std::sqrt((temp.x*temp.x)+((inputFrame.rows-temp.y)*(inputFrame.rows-temp.y)));
-        if(dis < dists){
-            dists = dis;
-            roi = temp;
-        }
-    }
-    int padding = 5;
-    roi.x = max(0, roi.x - padding);
-    roi.y = max(0, roi.y - padding);
-    roi.width = min(inputFrame.cols - roi.x, roi.width + 2*padding);
-    roi.height = min(inputFrame.rows - roi.y, roi.height + 2*padding);
-    cv::rectangle(frame, roi, cv::Scalar(0, 255, 255), 2);
-    cv::Mat roiMat = frame(roi);
-    cv::Mat gray;
-    cv::cvtColor(roiMat, gray, cv::COLOR_BGR2GRAY);
-    cv::Mat thresh;
-    cv::threshold(gray, thresh, 200, 255, cv::THRESH_BINARY);
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
-    cv::Mat morphed;
-    cv::morphologyEx(thresh, morphed, cv::MORPH_OPEN, kernel);
-    std::vector<cv::Vec3f> circles;
-    cv::HoughCircles(gray, circles, cv::HOUGH_GRADIENT, 1, gray.rows/8, 100, 30, gray.rows/4, gray.rows/2);
-    cv::Mat mask = cv::Mat::ones(gray.size(), CV_8UC1) * 255;
-    for(size_t i = 0; i < circles.size(); i++) {
-        cv::Point center(cvRound(circles[i][0]), cvRound(circles[i][1]));
-        int radius = cvRound(circles[i][2]);
-        cv::circle(mask, center, radius, cv::Scalar(0), 2);
-    }
-    cv::Mat masked;
-    cv::bitwise_and(morphed, mask, masked);
-    std::vector<std::vector<cv::Point>> contours;
-    std::vector<cv::Vec4i> hierarchy;
-    cv::findContours(masked, contours, hierarchy, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    double minArea = 10.0;
-    std::vector<std::vector<cv::Point>> filteredContours;
-    for (const auto& contour : contours) {
-        double area = cv::contourArea(contour);
-
-        if (area > minArea) {
-            cv::Rect boundRect = cv::boundingRect(contour);
-            double aspectRatio = (double)boundRect.width / boundRect.height;
-            std::vector<cv::Point> hull;
-            cv::convexHull(contour, hull);
-            double hullArea = cv::contourArea(hull);
-            double solidity = area / hullArea;
-            if (aspectRatio > 0.2 && aspectRatio < 5.0 && solidity > 0.5) {
-                filteredContours.push_back(contour);
-            }
-        }
-    }
-    qDebug() << "final: " << filteredContours.size();
-    if (!filteredContours.empty()) {
-        cv::Point center(gray.cols/2, gray.rows/2);
-        double minDistance = DBL_MAX;
-        int bestContourIdx = -1;
-        for (size_t i = 0; i < filteredContours.size(); i++) {
-            cv::Moments m = cv::moments(filteredContours[i]);
-            if (m.m00 != 0) {
-                cv::Point centerOfMass(m.m10/m.m00, m.m01/m.m00);
-                double distance = cv::norm(centerOfMass - center);
-                if (distance < minDistance) {
-                    minDistance = distance;
-                    bestContourIdx = i;
-                }
-            }
-        }
-        if (bestContourIdx >= 0) {
-            cv::Rect boundingBox = cv::boundingRect(filteredContours[bestContourIdx]);
-            boundingBox.x += roi.x;
-            boundingBox.y += roi.y;
-            cv::rectangle(frame, boundingBox, cv::Scalar(0, 255, 0), 2);
-        }
-    }
-    return frame;
-}*/
-
-/*
+    // CUDA NOT WORTH IT FOR FRAME BY FRAME ANALYSIS
 cv::Mat detectShapeGPU(const cv::Mat& input_frame) {
     cv::cuda::GpuMat gpu_frame(input_frame);
     cv::cuda::GpuMat gpu_gray, gpu_thresh;
@@ -353,6 +230,7 @@ cv::Mat detectShapeGPU(const cv::Mat& input_frame) {
 
 // might be the goat fr
 cv::Mat detectShape(cv::Mat input_frame){
+    // here in case the main version breaks and i need to start over
     cv::Mat frame = input_frame, gray_frame, thresh_frame;
     cv::cvtColor(frame, gray_frame, cv::COLOR_BGR2GRAY);
     cv::threshold(gray_frame, thresh_frame, 50, 255, cv::THRESH_BINARY_INV);
@@ -510,10 +388,58 @@ cv::Mat detectShape(cv::Mat input_frame){
     return frame;
 }
 
+cv::Mat detectShapeExp(cv::Mat frame){
+    // experimental
+    cv::Mat gray, thresh;
+
+    cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+    cv::threshold(gray, thresh, 230, 255, cv::THRESH_BINARY);
+
+    int morph_size = 1;
+    cv::Mat element = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(2 * morph_size + 1, 2 * morph_size + 1), cv::Point(morph_size, morph_size));
+
+    cv::erode(thresh, thresh, element);
+    cv::erode(thresh, thresh, element);
+    cv::morphologyEx(thresh, thresh, cv::MORPH_CLOSE, element);
+    imshow("before", thresh);
+
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(thresh, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    double min_dis = DBL_MAX;
+    cv::Rect actual_box;
+    for(int i = 0; i < contours.size(); i++){
+        cv::Rect box = cv::boundingRect(contours[i]);
+        double aspectRatio = (double)box.width / box.height;
+        std::vector<cv::Point> hull;
+        cv::convexHull(contours[i], hull);
+        double hullArea = cv::contourArea(hull);
+        double solidity = cv::contourArea(contours[i]) / hullArea;
+        double dis = box.x*box.x + (frame.rows-box.y)*(frame.rows-box.y);
+        if(aspectRatio > 0.8 && aspectRatio < 1.2 && solidity > 0.8 && dis < min_dis){
+            min_dis = dis;
+            box.width += 10;
+            box.height += 10;
+            box.x -= 5;
+            box.y -= 5;
+            actual_box = box;
+        }
+
+        /*
+        if(aspectRatio > 0.8 && aspectRatio < 1.2 && solidity > 0.8)
+            cv::rectangle(frame, box, cv::Scalar(255, 0, 0), 2);
+        else
+            cv::rectangle(frame, box, cv::Scalar(0, 0, 255), 2);
+        */
+    }
+    cv::rectangle(frame, actual_box, cv::Scalar(0, 255, 0), 2);
+
+    return frame;
+}
 
 int main(int argc, char* argv[]){
     QApplication app(argc, argv);
 
+    // console window for debugging while on release exec.
     /*console = new ConsoleWindow();
     console->resize(500, 300);
     console->show();
@@ -529,15 +455,47 @@ int main(int argc, char* argv[]){
             formatted_msg = QString("<span style='color:white'>[%1] [INFO] %2</span>").arg(timestamp, msg);
         console->appendMessage(formatted_msg);
     });*/
+
     qInfo() << "Hi";
+
+    // video filters outsorces, WIP
     /*
+    system("start python -u ../../please.py");
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    qDebug() << "yeah";
     cv::Mat frame = cv::imread("../../assets/full_crate_test.png");
-    //cv::Mat frame = cv::imread("../../assets/cam3.jpg");
-    cv::Mat frame2= detectShape(frame);
-    if(!frame2.empty())
-        cv::imshow("res", frame2);
+    WSAData wsa_data;
+    WSAStartup(MAKEWORD(2, 2), &wsa_data);
+    RTPStreamHandler* target = new RTPStreamHandler(9000, CLIENT_IP, PayloadType::AUDIO_PCM);
+    target->setUCharCallback([](std::vector<uchar> data){
+        qDebug() << "received shit, size: " << data.size();
+        cv::Mat frame = cv::imdecode(data, cv::IMREAD_COLOR);
+        //cv::cvtColor(frame, frame, cv::COLOR_BGR2RGB);
+        imshow("final", frame);
+    });
+    std::vector<uchar> compressed_data;
+    cv::imencode(".jpg", frame, compressed_data, {cv::IMWRITE_JPEG_QUALITY, 50});
+    compressed_data.insert(compressed_data.begin(), 0x00);
+    target->sendPacket(compressed_data);
+    qDebug() << "sent shit";
+    target->recvPacket();
     */
 
+    /*
+    // Filter performance tests
+    SubsectionWidget* widget = new SubsectionWidget(0);
+
+    cv::Mat frame = cv::imread("../../assets/full_crate_test_tri.png");
+    auto start = std::chrono::high_resolution_clock::now();
+    cv::Mat frame2 = widget->detectShapeHough(frame);
+    auto end = std::chrono::high_resolution_clock::now();
+    cv::imshow("frame", frame2);
+    qDebug() << std::chrono::duration_cast<std::chrono::milliseconds>(end-start).count() << " ms";
+    */
+
+    // --- ACTUAL PROGRAM ---
+    // 3d model viewer is commented out for debug version
+    // uncomment the relevant lines on MainWindow constructor on mainwindow.cpp
     WSAData wsa_data;
     WSAStartup(MAKEWORD(2, 2), &wsa_data);
     AppHandler* app_handler = new AppHandler(8000);
