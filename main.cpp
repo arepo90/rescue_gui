@@ -388,6 +388,7 @@ cv::Mat detectShape(cv::Mat input_frame){
     return frame;
 }
 
+/*
 cv::Mat detectShapeExp(cv::Mat frame){
     // experimental
     cv::Mat gray, thresh;
@@ -424,17 +425,18 @@ cv::Mat detectShapeExp(cv::Mat frame){
             actual_box = box;
         }
 
-        /*
-        if(aspectRatio > 0.8 && aspectRatio < 1.2 && solidity > 0.8)
-            cv::rectangle(frame, box, cv::Scalar(255, 0, 0), 2);
-        else
-            cv::rectangle(frame, box, cv::Scalar(0, 0, 255), 2);
-        */
+
+        //if(aspectRatio > 0.8 && aspectRatio < 1.2 && solidity > 0.8)
+        //    cv::rectangle(frame, box, cv::Scalar(255, 0, 0), 2);
+        //else
+        //    cv::rectangle(frame, box, cv::Scalar(0, 0, 255), 2);
+
     }
     cv::rectangle(frame, actual_box, cv::Scalar(0, 255, 0), 2);
 
     return frame;
 }
+*/
 
 int main(int argc, char* argv[]){
     QApplication app(argc, argv);

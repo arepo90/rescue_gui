@@ -225,7 +225,7 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     camera_dropdown = new QComboBox();
     camera_dropdown->addItem("No Camera");
     filter_dropdown = new QComboBox();
-    filter_dropdown->addItems({ "No filter", "QR Code", "Hazmat", "Shape - Hough", "Shape - Contours", "Shape - Hybrid", "Circles" });
+    filter_dropdown->addItems({ "No filter", "QR Code", "Hazmat", "Shape - Hough", "Circles - Gap", "Circles - Rays" });
     cam_id = -1;
     dropdowns->addWidget(camera_dropdown);
     dropdowns->addWidget(filter_dropdown);
@@ -235,7 +235,65 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     layout->setContentsMargins(0, 0, 0, 0);
     container->setLayout(layout);
     container->setStyleSheet("border: 0.5px solid gray;");
+    is_active.store(false);
+    is_cv_running.store(false);
     filters.none.store(true);
+    filter_socket->target_socket = new RTPStreamHandler(9000 + id*2, "127.0.0.1", PayloadType::VIDEO_MJPEG);
+    filter_socket->is_recv_running.store(true);
+    filter_socket->is_send_running.store(true);
+    filter_socket->target_socket->setUCharCallback([this, id](std::vector<uchar> data){
+        if(!data.empty()){
+            cv::Mat frame = cv::imdecode(data, cv::IMREAD_COLOR);
+            cv::cvtColor(frame, frame, cv::COLOR_BGR2RGB);
+            std::lock_guard<std::mutex> lock(filter_mutex);
+            filter_frame = frame;
+        }
+        else
+            qCritical() << "Filter socket " << id << " received and empty frame";
+    });
+    filter_socket->send_thread = std::thread([this](){
+        while(filter_socket->is_send_running.load()){
+            if(!is_cv_running.load()){
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                continue;
+            }
+            std::vector<uchar> compressed_data;
+            {
+                std::lock_guard<std::mutex> lock(compressed_mutex);
+                compressed_data = latest_compressed;
+            }
+            if(compressed_data.empty()){
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                continue;
+            }
+            unsigned char marker = 0x00;
+            if(filters.is_qr_active.load())
+                marker = 0x01;
+            else if(filters.is_hazmat_active.load())
+                marker = 0x02;
+            else if(filters.is_shape_active.load())
+                marker = 0x03;
+            else if(filters.is_circles1_active.load())
+                marker = 0x04;
+            else if(filters.is_circles2_active.load())
+                marker = 0x05;
+            else{
+                qWarning() << "Filter socket called with no active filter";
+                continue;
+            }
+            compressed_data.insert(compressed_data.begin(), marker);
+            filter_socket->target_socket->sendPacket(compressed_data);
+        }
+    });
+    filter_socket->recv_thread = std::thread([this](){
+        while(filter_socket->is_recv_running.load()){
+            if(!is_cv_running.load()){
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                continue;
+            }
+            filter_socket->target_socket->recvPacket();
+        }
+    });
     connect(camera_dropdown,  &QComboBox::currentIndexChanged, this, [this](int index){
         cam_id = index - 1;
         emit selectionChanged();
@@ -248,26 +306,27 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
             filter_dropdown->blockSignals(true);
             filter_dropdown->setCurrentIndex(0);
             filter_dropdown->blockSignals(false);
+            is_cv_running.store(false);
+        }
+        else{
+            is_cv_running.store(true);
         }
         filters.none.store(index == 0);
         filters.is_qr_active.store(index == 1);
         filters.is_hazmat_active.store(index == 2);
-        filters.is_shape1_active.store(index == 3);
-        filters.is_shape2_active.store(index == 4);
-        filters.is_shape3_active.store(index == 5);
-        filters.is_circles_active.store(index == 6);
+        filters.is_shape_active.store(index == 3);
+        filters.is_circles1_active.store(index == 4);
+        filters.is_circles2_active.store(index == 5);
     });
     cameraView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     cameraView->setPixmap(QPixmap("../../assets/404.png").scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
-    is_active.store(false);
-    is_cv_running.store(true);
+    /*
     cv_thread = std::thread([this](){
         while(is_cv_running.load()){
             if(filters.none.load()){
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 continue;
             }
-            auto start = std::chrono::high_resolution_clock::now();
             if(filters.is_qr_active.load()){
                 std::string decodedText;
                 std::vector<cv::Point> points;
@@ -283,13 +342,6 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
                     frame = latest_frame;
                 }
                 decodedText = filters.qr_decoder.detectAndDecode(frame, points);
-                /*
-                if(!points.empty()){
-                    for(int i = 0; i < points.size(); i++) {
-                        cv::line(frame, points[i], points[(i+1) % points.size()], cv::Scalar(0, 255, 0), 2);
-                    }
-                }
-                */
                 if(!decodedText.empty())
                     qDebug() << "QR Code: " << decodedText;
                 else
@@ -340,10 +392,9 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
                 std::lock_guard<std::mutex> lock(filter_mutex);
                 filter_frame = frame;
             }
-            auto end = std::chrono::high_resolution_clock::now();
-            qDebug() << "filter: " << std::chrono::duration_cast<std::chrono::milliseconds>(end-start).count() << " ms";
         }
     });
+    */
     connect(this, &SubsectionWidget::frameReady, this, [this](QImage image){
         if(!image.isNull())
             cameraView->setPixmap(QPixmap::fromImage(qt_frame).scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
@@ -353,10 +404,15 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
 }
 
 SubsectionWidget::~SubsectionWidget(){
-    emit destructorCalled(id);
     filters.none.store(true);
     is_cv_running.store(false);
+    filter_socket->is_active.store(false);
+    filter_socket->is_recv_running.store(false);
+    filter_socket->is_send_running.store(false);
+    emit destructorCalled(id);
     if(cv_thread.joinable()) cv_thread.join();
+    if(id == 0)
+        filter_socket->target_socket->sendPacket(std::vector<uchar>{0x00});
 }
 
 void SubsectionWidget::updateAvailableOptions(const QSet<QString> &usedOptions) {
@@ -384,28 +440,15 @@ void SubsectionWidget::onCameraSelected(int index) {
 }
 */
 
-void SubsectionWidget::updateFrame(cv::Mat frame){
-    {
-        std::lock_guard<std::mutex> lock(frame_mutex);
-        latest_frame = frame;
+void SubsectionWidget::updateFrame(cv::Mat frame, std::vector<uchar> compressed){
+    if(!compressed.empty()){
+        std::lock_guard<std::mutex> lock(compressed_mutex);
+        latest_compressed = compressed;
     }
     if(!filters.none.load()){
-        std::vector<cv::Point> points;
-        {
-            std::lock_guard<std::mutex> lock(filter_mutex);
-            //points = filter_points;
-
-            if(!filter_frame.empty())
-                frame = filter_frame;
-        }
-
-        /*
-        if(!points.empty()){
-            for(int i = 0; i < points.size(); i++) {
-                cv::line(frame, points[i], points[(i+1) % points.size()], cv::Scalar(0, 255, 0), 2);
-            }
-        }
-        */
+        std::lock_guard<std::mutex> lock(filter_mutex);
+        if(!filter_frame.empty())
+            frame = filter_frame;
     }
     if(!frame.empty() && frame.data != nullptr && frame.cols > 0 && frame.rows > 0) {
         if(frame.type() != CV_8UC3)
@@ -421,7 +464,6 @@ void SubsectionWidget::updateFrame(cv::Mat frame){
         else
             qDebug() << "Image is null after conversion!";
         */
-
     }
     else
         qDebug() << "Invalid frame: empty or corrupt";
@@ -432,447 +474,6 @@ void SubsectionWidget::updateFrame(cv::Mat frame){
 void SubsectionWidget::mousePressEvent(QMouseEvent *event) {
     emit subsectionClicked(this);
     QWidget::mousePressEvent(event);
-}
-
-cv::Mat SubsectionWidget::detectShapeHybrid(cv::Mat input_frame){
-    cv::Mat frame = input_frame, gray_frame, thresh_frame;
-    std::vector<std::vector<cv::Point>> sector_contours, contours_copy;
-    cv::cvtColor(frame, gray_frame, cv::COLOR_BGR2GRAY);
-
-    cv::threshold(gray_frame, thresh_frame, 100, 255, cv::THRESH_BINARY_INV);
-    //std::vector<cv::Vec4i> hierarchy;
-    auto start = std::chrono::high_resolution_clock::now();
-    cv::findContours(thresh_frame, sector_contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    auto end = std::chrono::high_resolution_clock::now();
-    qDebug() << "first contours: " << std::chrono::duration_cast<std::chrono::milliseconds>(end-start).count();
-    //cv::findContours(thresh_frame, contours_copy, hierarchy, cv::RETR_CCOMP, cv::CHAIN_APPROX_SIMPLE);
-
-    /*
-    if(contours_copy.empty()){
-        qDebug() << "no contours";
-        return cv::Mat();
-    }
-    qDebug() << "contours: " << contours_copy.size();
-    for (int i = 0; i < contours_copy.size(); i++) {
-        if (hierarchy[i][2] == -1) {
-            sector_contours.push_back(contours_copy[i]);
-        }
-    }*/
-    //return thresh_frame;
-
-    cv::Rect task_sector;
-    double min_dis = DBL_MAX;
-    long long area = 0;
-    for(int i = 0; i < sector_contours.size(); i++){
-        double area = cv::contourArea(sector_contours[i]);
-        if(area < 10000) continue;
-        cv::Rect temp = cv::boundingRect(sector_contours[i]);
-        double dis = temp.x*temp.x + (frame.rows - temp.y)*(frame.rows - temp.y);
-        area = max(area, temp.area());
-        if(dis < min_dis){
-            min_dis = dis;
-            task_sector = temp;
-        }
-        cv::rectangle(frame, temp, cv::Scalar(255, 0, 255), 2);
-    }
-    if(min_dis == DBL_MAX){
-        qDebug() << "no task sector";
-        return cv::Mat();
-    }
-    cv::rectangle(frame, task_sector, cv::Scalar(0, 255, 255), 2);
-    cv::Mat final = gray_frame(task_sector);
-
-
-    //cv::HoughCircles(task_mat, circles, cv::HOUGH_GRADIENT, 1, task_mat.rows/8, 100, 50, task_mat.rows/8, task_mat.rows/3);
-    //cv::Mat mask = cv::Mat::ones(task_mat.size(), CV_8UC1) * 255;
-
-    std::vector<cv::Vec3f> circles;
-
-    start = std::chrono::high_resolution_clock::now();
-    cv::HoughCircles(final, circles, cv::HOUGH_GRADIENT, 1, final.rows/8, 100, 50, final.rows/8, final.rows/3);
-    end = std::chrono::high_resolution_clock::now();
-    qDebug() << "circles: " << std::chrono::duration_cast<std::chrono::milliseconds>(end-start).count();
-
-    cv::Mat mask = cv::Mat::ones(final.size(), CV_8UC1) * 255;
-
-    //qDebug() << "circles: " << circles.size();
-    for(int i = 0; i < sector_contours.size(); i++){
-        double area = cv::contourArea(sector_contours[i]);
-        if(area < 10000) continue;
-        cv::Rect temp = cv::boundingRect(sector_contours[i]);
-        double dis = temp.x*temp.x + (frame.rows - temp.y)*(frame.rows - temp.y);
-        if(dis < min_dis){
-            min_dis = dis;
-            task_sector = temp;
-        }
-        cv::rectangle(frame, temp, cv::Scalar(255, 0, 255), 2);
-    }
-
-    min_dis = DBL_MAX;
-    cv::Vec3f circle_sector;
-
-    for(int i = 0; i < circles.size(); i++){
-        cv::Point center(cvRound(circles[i][0]), cvRound(circles[i][1]));
-        int radius = cvRound(circles[i][2]) + 5;
-        cv::circle(mask, center, radius, cv::Scalar(0), 8);
-        double dis = circles[i][0]*circles[i][0] + circles[i][1]*circles[i][1];
-        if(dis < min_dis){
-            min_dis = dis;
-            circle_sector = { circles[i][0], circles[i][1], circles[i][2] };
-        }
-    }
-    if(min_dis == DBL_MAX){
-        qDebug() << "no inner circles sector";
-        return cv::Mat();
-    }
-    cv::circle(frame, cv::Point(cvRound(circle_sector[0]+task_sector.x), cvRound(circle_sector[1]+task_sector.y)), cvRound(circle_sector[2])-10, cv::Scalar(0, 0, 255), 2);
-
-    std::vector<std::vector<cv::Point>> contours;
-
-    /*
-    cv::Mat masked;
-    cv::bitwise_and(morphed, mask, masked);
-    mask = cv::Mat::zeros(task_thresh.size(), CV_8UC1);
-    if(circles.size() == 0){
-        cv::imshow("circles", task_mat);
-        qDebug() << "no circles found";
-        return cv::Mat();
-    }
-    cv::circle(mask, cv::Point(cvRound(circles[0][0]), cvRound(circles[0][1])), cvRound(circles[0][2])-15, cv::Scalar(255), -1);
-    cv::Mat result;
-    task_thresh.copyTo(result, mask);
-    cv::imshow("please", result);
-    cv::findContours(masked, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    */
-
-    cv::Mat mask_roi = cv::Mat::zeros(final.size(), CV_8UC1), roi, ahorasi;
-    // FIX THIS SHIT BRUH;
-    //circle_sector[0] += task_sector.x;
-    //circle_sector[1] += task_sector.y;
-    cv::circle(mask_roi, cv::Point(cvRound(circle_sector[0]), cvRound(circle_sector[1])), cvRound(circle_sector[2])-10, cv::Scalar(255), -1);
-    final.copyTo(roi, mask_roi);
-    cv::Rect bounding_box2 = cv::boundingRect(mask_roi);
-    cv::Mat finalfinal = roi(bounding_box2);
-    cv::threshold(roi, ahorasi, 200, 255, cv::THRESH_BINARY);
-    start = std::chrono::high_resolution_clock::now();
-    cv::findContours(ahorasi, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    end = std::chrono::high_resolution_clock::now();
-    qDebug() << "second contuors: " << std::chrono::duration_cast<std::chrono::milliseconds>(end-start).count();
-
-    std::vector<std::vector<cv::Point>> filtered_contours;
-    for (const auto& contour : contours) {
-        double area = cv::contourArea(contour);
-        if (area <= 10.0) continue;
-
-        cv::Rect bound_rect = cv::boundingRect(contour);
-        double aspect_ratio = static_cast<double>(bound_rect.width) / bound_rect.height;
-
-        std::vector<cv::Point> hull;
-        cv::convexHull(contour, hull);
-        double hull_area = cv::contourArea(hull);
-        double solidity = area / hull_area;
-
-        if (aspect_ratio > 0.5 && aspect_ratio < 1.5 && solidity > 0.5) {
-            filtered_contours.push_back(contour);
-        }
-    }
-
-    if (!filtered_contours.empty()) {
-        //cv::Point center(task_mat.cols / 2, task_mat.rows / 2);
-        cv::Point center(ahorasi.cols / 2, ahorasi.rows / 2);
-        double min_distance = DBL_MAX;
-        int best_contour_idx = -1;
-
-        for (int i = 0; i < filtered_contours.size(); ++i) {
-            cv::Moments m = cv::moments(filtered_contours[i]);
-            if (m.m00 != 0) {
-                cv::Point center_of_mass(m.m10 / m.m00, m.m01 / m.m00);
-                center.x += task_sector.x;
-                center.y += task_sector.y;
-                double distance = cv::norm(center_of_mass - center);
-                if (distance < min_distance){
-                    min_distance = distance;
-                    best_contour_idx = i;
-                }
-                /*
-                cv::Rect bounding_box3 = cv::boundingRect(filtered_contours[i]);
-                bounding_box3.x += bounding_box.x - 10;
-                bounding_box3.y += bounding_box.y - 10;
-                bounding_box3.width += 20;
-                bounding_box3.height += 20;
-                cv::rectangle(frame, bounding_box3, cv::Scalar(255, 255, 0), 2);
-                */
-
-            }
-        }
-
-        if (best_contour_idx >= 0) {
-            cv::Rect bounding_box3 = cv::boundingRect(filtered_contours[best_contour_idx]);
-            //bounding_box.x += task_sector.x - 10;
-            //bounding_box.y += task_sector.y - 10;
-            bounding_box3.x += task_sector.x - 10;
-            bounding_box3.y += task_sector.y - 10;
-            bounding_box3.width += 20;
-            bounding_box3.height += 20;
-            cv::rectangle(frame, bounding_box3, cv::Scalar(0, 255, 0), 2);
-        }
-
-    }
-    return frame;
-}
-
-cv::Mat SubsectionWidget::detectShapeContours(const cv::Mat& input_frame){
-
-    cv::Mat gray, thresh, frame = input_frame.clone();
-
-    cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
-    cv::threshold(gray, thresh, 240, 255, cv::THRESH_BINARY);
-
-    int morph_size = 3;
-    cv::Mat element = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(2 * morph_size + 1, 2 * morph_size + 1), cv::Point(morph_size, morph_size));
-
-    cv::erode(thresh, thresh, element);
-    //cv::erode(thresh, thresh, element);
-    cv::morphologyEx(thresh, thresh, cv::MORPH_CLOSE, element);
-    return thresh;
-
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(thresh, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    double min_dis = DBL_MAX;
-    cv::Rect actual_box;
-    for(int i = 0; i < contours.size(); i++){
-        cv::Rect box = cv::boundingRect(contours[i]);
-        double aspectRatio = (double)box.width / box.height;
-        std::vector<cv::Point> hull;
-        cv::convexHull(contours[i], hull);
-        double hullArea = cv::contourArea(hull);
-        double solidity = cv::contourArea(contours[i]) / hullArea;
-        double dis = box.x*box.x + (frame.rows-box.y)*(frame.rows-box.y);
-        if(aspectRatio > 0.8 && aspectRatio < 1.2 && solidity > 0.8 && dis < min_dis){
-            min_dis = dis;
-            box.width += 10;
-            box.height += 10;
-            box.x -= 5;
-            box.y -= 5;
-            actual_box = box;
-        }
-        cv::rectangle(frame, box, cv::Scalar(0, 0, 255), 2);
-        /*
-    if(aspectRatio > 0.8 && aspectRatio < 1.2 && solidity > 0.8)
-        cv::rectangle(frame, box, cv::Scalar(255, 0, 0), 2);
-    else
-        cv::rectangle(frame, box, cv::Scalar(0, 0, 255), 2);
-    */
-    }
-    cv::rectangle(frame, actual_box, cv::Scalar(0, 255, 0), 2);
-
-    return frame;
-
-    /*
-    cv::Mat frame = input_frame.clone();
-    cv::Mat gray_quadrant;
-    cv::cvtColor(input_frame, gray_quadrant, cv::COLOR_BGR2GRAY);
-    cv::Mat thresh_quadrant;
-    cv::threshold(gray_quadrant, thresh_quadrant, 50, 255, cv::THRESH_BINARY_INV);
-    std::vector<std::vector<cv::Point>> quadrant_contours;
-
-    return thresh_quadrant;
-    cv::findContours(thresh_quadrant, quadrant_contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-
-    cv::Rect roi;
-    double best_dist = DBL_MAX;
-    for(const auto& contour : quadrant_contours) {
-        double area = cv::contourArea(contour);
-        if(area < 1000) continue;
-        cv::Rect temp = cv::boundingRect(contour);
-        double dist = temp.x*temp.x + (input_frame.rows - temp.y)*(input_frame.rows - temp.y);
-        if(dist < best_dist){
-            best_dist = dist;
-            roi = temp;
-        }
-    }
-    int padding = 5;
-    roi.x = max(0, roi.x - padding);
-    roi.y = max(0, roi.y - padding);
-    roi.width = min(input_frame.cols - roi.x, roi.width + 2 * padding);
-    roi.height = min(input_frame.rows - roi.y, roi.height + 2 * padding);
-    cv::rectangle(frame, roi, cv::Scalar(0, 255, 255), 2);
-
-    cv::Mat roi_mat = frame(roi);
-    cv::Mat gray;
-    cv::cvtColor(roi_mat, gray, cv::COLOR_BGR2GRAY);
-    cv::Mat thresh;
-    cv::threshold(gray, thresh, 200, 255, cv::THRESH_BINARY);
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
-    cv::Mat morphed;
-    cv::morphologyEx(thresh, morphed, cv::MORPH_OPEN, kernel);
-
-    std::vector<cv::Vec3f> circles;
-    cv::HoughCircles(gray, circles, cv::HOUGH_GRADIENT, 1, gray.rows / 8, 100, 30, gray.rows / 4, gray.rows / 2);
-
-    cv::Mat mask = cv::Mat::ones(gray.size(), CV_8UC1) * 255;
-    for (const auto& circle : circles) {
-        cv::Point center(cvRound(circle[0]), cvRound(circle[1]));
-        int radius = cvRound(circle[2]);
-        cv::circle(mask, center, radius, cv::Scalar(0), 2);
-    }
-
-    cv::Mat masked;
-    cv::bitwise_and(morphed, mask, masked);
-
-    std::vector<std::vector<cv::Point>> contours;
-    std::vector<cv::Vec4i> hierarchy;
-    cv::findContours(masked, contours, hierarchy, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-
-    std::vector<std::vector<cv::Point>> filtered_contours;
-    for (const auto& contour : contours) {
-        double area = cv::contourArea(contour);
-        if (area <= 10.0) continue;
-
-        cv::Rect bound_rect = cv::boundingRect(contour);
-        double aspect_ratio = static_cast<double>(bound_rect.width) / bound_rect.height;
-
-        std::vector<cv::Point> hull;
-        cv::convexHull(contour, hull);
-        double hull_area = cv::contourArea(hull);
-        double solidity = area / hull_area;
-
-        if (aspect_ratio > 0.2 && aspect_ratio < 5.0 && solidity > 0.5) {
-            filtered_contours.push_back(contour);
-        }
-    }
-
-    if (!filtered_contours.empty()) {
-        cv::Point center(gray.cols / 2, gray.rows / 2);
-        double min_distance = DBL_MAX;
-        int best_contour_idx = -1;
-
-        for (int i = 0; i < filtered_contours.size(); ++i) {
-            cv::Moments m = cv::moments(filtered_contours[i]);
-            if (m.m00 != 0) {
-                cv::Point center_of_mass(m.m10 / m.m00, m.m01 / m.m00);
-                double distance = cv::norm(center_of_mass - center);
-                if (distance < min_distance) {
-                    min_distance = distance;
-                    best_contour_idx = i;
-                }
-            }
-        }
-
-        if (best_contour_idx >= 0) {
-            cv::Rect bounding_box = cv::boundingRect(filtered_contours[best_contour_idx]);
-            bounding_box.x += roi.x;
-            bounding_box.y += roi.y;
-            cv::rectangle(frame, bounding_box, cv::Scalar(0, 255, 0), 2);
-        }
-    }
-    return frame;
-    */
-}
-
-cv::Mat SubsectionWidget::detectShapeHough(cv::Mat frame){
-    cv::Mat gray_frame, thresh_frame;
-    std::vector<std::vector<cv::Point>> shape_contours, filtered_contours;
-    std::vector<cv::Vec3f> ext_circles, inner_circles;
-
-    cv::cvtColor(frame, gray_frame, cv::COLOR_BGR2GRAY);
-    cv::Mat temp;
-    cv::resize(gray_frame, temp, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
-    cv::HoughCircles(temp, ext_circles, cv::HOUGH_GRADIENT, 1, temp.rows/8, 100, 50, temp.rows/8, temp.rows/4);
-
-    double min_dis = DBL_MAX;
-    cv::Vec3f ext_sector;
-    for(int i = 0; i < ext_circles.size(); i++){
-        ext_circles[i][0] *= 4.0;
-        ext_circles[i][1] *= 4.0;
-        ext_circles[i][2] *= 4.0;
-        cv::Point center(cvRound(ext_circles[i][0]), cvRound(ext_circles[i][1]));
-        int radius = cvRound(ext_circles[i][2]);
-        double dis = center.x*center.x + (frame.rows - center.y)*(frame.rows - center.y);
-        if(dis < min_dis){
-            min_dis = dis;
-            ext_sector = ext_circles[i];
-        }
-    }
-    if(min_dis == DBL_MAX){
-        qDebug() << "no outer circle";
-        return cv::Mat();
-    }
-
-    cv::Mat ext_mask = cv::Mat::zeros(frame.size(), CV_8UC1), frame_roi;
-    cv::circle(ext_mask, cv::Point(cvRound(ext_sector[0]), cvRound(ext_sector[1])), cvRound(ext_sector[2]), cv::Scalar(255), -1);
-    gray_frame.copyTo(temp, ext_mask);
-    cv::Rect ext_box = cv::boundingRect(ext_mask);
-    frame_roi = temp(ext_box);
-    if(frame_roi.empty() || frame_roi.rows < 8 || frame_roi.cols < 8){
-        qDebug() << "empty final";
-        return cv::Mat();
-    }
-
-    cv::HoughCircles(frame_roi, ext_circles, cv::HOUGH_GRADIENT, 1, frame_roi.rows/8, 100, 50, frame_roi.rows/8, frame_roi.rows/3);
-    cv::Mat roi_mask = cv::Mat::ones(frame_roi.size(), CV_8UC1) * 255;
-    for(int i = 0; i < ext_circles.size(); i++){
-        cv::Point center(cvRound(ext_circles[i][0]), cvRound(ext_circles[i][1]));
-        int radius = cvRound(ext_circles[i][2]) + 5;
-        cv::circle(roi_mask, center, radius, cv::Scalar(0), 8);
-        center.x += ext_box.x;
-        center.y += ext_box.y;
-        //cv::circle(frame, center, radius, cv::Scalar(255, 0, 0), 2);
-    }
-    if(ext_circles.empty()){
-        qDebug() << "no inner circles";
-        return cv::Mat();
-    }
-    else if(ext_circles.size() > 1)
-        qWarning() << "Inner circle conflict";
-
-    cv::Mat mask_roi = cv::Mat::zeros(frame_roi.size(), CV_8UC1), final, final_thresh;
-    // FIX THIS
-    cv::circle(mask_roi, cv::Point(cvRound(ext_circles[0][0]), cvRound(ext_circles[0][1])), cvRound(ext_circles[0][2])-10, cv::Scalar(255), -1);
-    frame_roi.copyTo(final, mask_roi);
-    cv::threshold(final, final_thresh, 200, 255, cv::THRESH_BINARY);
-
-    cv::findContours(final_thresh, shape_contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    for (int i = 0; i < shape_contours.size(); i++) {
-        double area = cv::contourArea(shape_contours[i]);
-        if (area <= 10.0) continue;
-        cv::Rect bound_rect = cv::boundingRect(shape_contours[i]);
-        std::vector<cv::Point> hull;
-        double aspect_ratio = static_cast<double>(bound_rect.width) / bound_rect.height;
-        cv::convexHull(shape_contours[i], hull);
-        double solidity = area / cv::contourArea(hull);
-        if (aspect_ratio > 0.5 && aspect_ratio < 1.5 && solidity > 0.5) {
-            filtered_contours.push_back(shape_contours[i]);
-        }
-    }
-
-    if (!filtered_contours.empty()) {
-        cv::Point center(final.cols / 2, final.rows / 2);
-        double min_distance = DBL_MAX;
-        int best_contour_idx = -1;
-        for(int i = 0; i < filtered_contours.size(); ++i) {
-            cv::Moments m = cv::moments(filtered_contours[i]);
-            if(m.m00 != 0) {
-                cv::Point center_of_mass(m.m10 / m.m00, m.m01 / m.m00);
-                center.x += ext_box.x;
-                center.y += ext_box.y;
-                double distance = cv::norm(center_of_mass - center);
-                if (distance < min_distance){
-                    min_distance = distance;
-                    best_contour_idx = i;
-                }
-            }
-        }
-        if (best_contour_idx >= 0) {
-            cv::Rect box = cv::boundingRect(filtered_contours[best_contour_idx]);
-            box.x += ext_box.x - 10;
-            box.y += ext_box.y - 10;
-            box.width += 20;
-            box.height += 20;
-            cv::rectangle(frame, box, cv::Scalar(0, 255, 0), 2);
-        }
-    }
-    return frame;
 }
 
 // --- main window ---
@@ -1025,7 +626,7 @@ void MainWindow::updateFrame(int id, std::vector<unsigned char> data){
             sub_id = it->first;
     }
     if(sub_id != -1)
-        subsections[sub_id]->updateFrame(frame);
+        subsections[sub_id]->updateFrame(frame, data);
 }
 
 template<typename T> void MainWindow::updateDashbord(int index, T data){

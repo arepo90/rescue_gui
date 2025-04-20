@@ -96,60 +96,6 @@ private:
     int dead_zone;
 };
 
-class SubsectionWidget : public QWidget{
-    Q_OBJECT
-public:
-    explicit SubsectionWidget(int id, QWidget *parent = nullptr);
-    ~SubsectionWidget();
-    void destroy(){ delete this; }
-    void setAvailableDevices(int num_cams);
-    void setFullScreenMode(bool fullScreen){ this->fullScreen = fullScreen; }
-    void updateAvailableOptions(const QSet<QString> &usedOptions);
-    std::pair<int, QString> getCurrentSelection(){ return std::make_pair(cam_id, camera_dropdown->currentText()); }
-    void updateFrame(cv::Mat frame);
-    cv::Mat detectShapeContours(const cv::Mat& input_frame);
-    cv::Mat detectShapeHough(cv::Mat input_frame);
-    cv::Mat detectShapeHybrid(cv::Mat input_frame);
-signals:
-    void subsectionClicked(SubsectionWidget *widget);
-    void selectionChanged();
-    void frameReady(QImage image);
-    void destructorCalled(int id);
-protected:
-    void mousePressEvent(QMouseEvent *event) override;
-private:
-    struct Filters{
-        std::atomic<bool> none;
-        std::atomic<bool> is_qr_active;
-        std::atomic<bool> is_hazmat_active;
-        std::atomic<bool> is_shape1_active;
-        std::atomic<bool> is_shape2_active;
-        std::atomic<bool> is_shape3_active;
-        std::atomic<bool> is_circles_active;
-        cv::QRCodeDetector qr_decoder;
-    };
-    Filters filters;
-    QComboBox *camera_dropdown;
-    QComboBox *filter_dropdown;
-    int cam_id;
-    int id;
-    QLabel* cameraView;
-    QVBoxLayout* layout;
-    QHBoxLayout* dropdowns;
-    QWidget* container;
-    std::vector<int> availableDevices;
-    bool fullScreen = false;
-    std::atomic<bool> is_active;
-    std::mutex frame_mutex;
-    std::mutex filter_mutex;
-    cv::Mat latest_frame;
-    cv::Mat filter_frame;
-    std::vector<cv::Point> filter_points;
-    std::thread cv_thread;
-    std::atomic<bool> is_cv_running;
-    QImage qt_frame;
-};
-
 class ModelWidget : public QWidget{
     Q_OBJECT
 public:
@@ -263,6 +209,59 @@ struct SocketStruct{
     SocketStruct& operator=(const SocketStruct&) = delete;
 };
 
+class SubsectionWidget : public QWidget{
+    Q_OBJECT
+public:
+    explicit SubsectionWidget(int id, QWidget *parent = nullptr);
+    ~SubsectionWidget();
+    void destroy(){ delete this; }
+    void setAvailableDevices(int num_cams);
+    void setFullScreenMode(bool fullScreen){ this->fullScreen = fullScreen; }
+    void updateAvailableOptions(const QSet<QString> &usedOptions);
+    std::pair<int, QString> getCurrentSelection(){ return std::make_pair(cam_id, camera_dropdown->currentText()); }
+    void updateFrame(cv::Mat frame, std::vector<uchar> compressed = {});
+signals:
+    void subsectionClicked(SubsectionWidget *widget);
+    void selectionChanged();
+    void frameReady(QImage image);
+    void destructorCalled(int id);
+protected:
+    void mousePressEvent(QMouseEvent *event) override;
+private:
+    struct Filters{
+        std::atomic<bool> none;
+        std::atomic<bool> is_qr_active;
+        std::atomic<bool> is_hazmat_active;
+        std::atomic<bool> is_shape_active;
+        std::atomic<bool> is_circles1_active;
+        std::atomic<bool> is_circles2_active;
+        cv::QRCodeDetector qr_decoder;
+    };
+    Filters filters;
+    QComboBox *camera_dropdown;
+    QComboBox *filter_dropdown;
+    int cam_id;
+    int id;
+    QLabel* cameraView;
+    QVBoxLayout* layout;
+    QHBoxLayout* dropdowns;
+    QWidget* container;
+    std::vector<int> availableDevices;
+    bool fullScreen = false;
+    std::atomic<bool> is_active;
+    std::mutex frame_mutex;
+    std::mutex filter_mutex;
+    std::mutex compressed_mutex;
+    cv::Mat latest_frame;
+    cv::Mat filter_frame;
+    std::vector<uchar> latest_compressed;
+    std::vector<cv::Point> filter_points;
+    std::thread cv_thread;
+    std::atomic<bool> is_cv_running;
+    QImage qt_frame;
+    SocketStruct* filter_socket;
+};
+
 class MainWindow : public QWidget{
     Q_OBJECT
 public:
@@ -297,6 +296,27 @@ private:
     std::vector<int> scanVideoCaptureDevices();
     std::map<int, int> cam_map;
 };
+
+class AppHandler : public QObject{
+    Q_OBJECT
+public:
+    AppHandler(int port, QObject *parent = nullptr);
+    ~AppHandler();
+    void init();
+    void destroy(){ delete this; }
+private:
+    PaError PaErrorCallback(const char *errorText, PaHostApiTypeId hostApiType, PaHostErrorInfo* hostErrorInfo){ return 0; }
+    SocketStruct* base_socket;
+    std::vector<SocketStruct*> video_sockets;
+    std::atomic<bool> is_audio_active;
+    int port;
+    int pa_error;
+    MainWindow* window;
+    SocketStruct* audio_socket;
+    OpusDecoder* opus_decoder;
+    PaStream* stream;
+};
+
 
 // --- DEPRECATED CLASS - USE RTPSTREAMHANDLER INSTEAD ---
 /*
@@ -339,24 +359,5 @@ private:
 };
 */
 
-class AppHandler : public QObject{
-    Q_OBJECT
-public:
-    AppHandler(int port, QObject *parent = nullptr);
-    ~AppHandler();
-    void init();
-    void destroy(){ delete this; }
-private:
-    PaError PaErrorCallback(const char *errorText, PaHostApiTypeId hostApiType, PaHostErrorInfo* hostErrorInfo){ return 0; }
-    SocketStruct* base_socket;
-    std::vector<SocketStruct*> video_sockets;
-    std::atomic<bool> is_audio_active;
-    int port;
-    int pa_error;
-    MainWindow* window;
-    SocketStruct* audio_socket;
-    OpusDecoder* opus_decoder;
-    PaStream* stream;
-};
 
 #endif
