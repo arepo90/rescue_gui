@@ -17,7 +17,6 @@
 
 #include "mainwindow.h"
 #include <QApplication>
-#include <cstdio>
 
 // WORK IN PROGRESS OK ?😭😭😭😭😭
 
@@ -495,9 +494,10 @@ int main(int argc, char* argv[]){
     qDebug() << std::chrono::duration_cast<std::chrono::milliseconds>(end-start).count() << " ms";
     */
 
-    // --- ACTUAL PROGRAM ---
+    // --- ACTUAL PROGRAM---
     // 3d model viewer is commented out for debug version
     // uncomment the relevant lines on MainWindow constructor on mainwindow.cpp
+
     WSAData wsa_data;
     WSAStartup(MAKEWORD(2, 2), &wsa_data);
     AppHandler* app_handler = new AppHandler(8000);

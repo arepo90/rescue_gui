@@ -194,7 +194,7 @@ void ModelWidget::updateModel(float angleX, float angleY, float angleZ){
 // ONLY FOR ARTICULATION (PIVOT) ENTITIES
 void ModelWidget::updatePivot(int index, int axis, float angle){
     if(index >= pivots.size()){
-        qCritical() << "Failed to update pivot. Out of bounds";
+        qCritical() << "MODEL UPDATE PIVOT | Invalid pivot index: out of bounds";
         return;
     }
     if(axis == 0)
@@ -204,12 +204,12 @@ void ModelWidget::updatePivot(int index, int axis, float angle){
     else if(axis == 2)
         pivots[index]->setRotation(QQuaternion::fromEulerAngles(pivots[index]->rotationX(), pivots[index]->rotationY(), angle));
     else
-        qCritical() << "Failed to update pivot. Unvalid axis value";
+        qCritical() << "MODEL UPDATE PIVOT | Invalid pivot axis: out of bounds";
 }
 
 void ModelWidget::updateColor(int index, QColor color){
     if(index >= band_colors.size()){
-        qCritical() << "Failed to update color. Out of bounds";
+        qCritical() << "MODEL UPDATE COLOR | Invalid part index: out of bounds";
         return;
     }
     band_colors[index]->setDiffuse(color);
@@ -238,22 +238,33 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     is_active.store(false);
     is_cv_running.store(false);
     filters.none.store(true);
-    filter_socket->target_socket = new RTPStreamHandler(9000 + id*2, "127.0.0.1", PayloadType::VIDEO_MJPEG);
-    filter_socket->is_recv_running.store(true);
-    filter_socket->is_send_running.store(true);
-    filter_socket->target_socket->setUCharCallback([this, id](std::vector<uchar> data){
-        if(!data.empty()){
-            cv::Mat frame = cv::imdecode(data, cv::IMREAD_COLOR);
-            cv::cvtColor(frame, frame, cv::COLOR_BGR2RGB);
-            std::lock_guard<std::mutex> lock(filter_mutex);
-            filter_frame = frame;
+    filters.is_qr_active.store(false);
+    filters.is_shape_active.store(false);
+    filters.is_circles1_active.store(false);
+    filters.is_circles2_active.store(false);
+    filters.is_hazmat_active.store(false);
+    filter_channel = new SocketStruct;
+    filter_channel->target_socket = new RTPStreamHandler(9000 + id*2, "127.0.0.1", PayloadType::VIDEO_MJPEG);
+    qDebug() << "successful handler id: " << id;
+    filter_channel->is_recv_running.store(true);
+    filter_channel->is_send_running.store(true);
+    long long start = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+    filter_channel->target_socket->setUCharCallback([this, id, start](std::vector<uchar> data){
+        if(data.empty()){
+            qCritical() << "SUBSECTION " << this->id << " FILTER CALLBACK | Invalid payload: data buffer empty";
+            return;
         }
-        else
-            qCritical() << "Filter socket " << id << " received and empty frame";
+        auto curr = std::chrono::high_resolution_clock::now();
+        qDebug() << "updating filter frame, size: " << data.size() << " at " << std::chrono::duration_cast<std::chrono::milliseconds>(curr.time_since_epoch()).count() - start;
+        cv::Mat frame = cv::imdecode(data, cv::IMREAD_COLOR);
+        cv::cvtColor(frame, frame, cv::COLOR_BGR2RGB);
+        std::lock_guard<std::mutex> lock(filter_mutex);
+        filter_frame = frame;
     });
-    filter_socket->send_thread = std::thread([this](){
-        while(filter_socket->is_send_running.load()){
-            if(!is_cv_running.load()){
+    filter_channel->send_thread = std::thread([this](){
+        while(filter_channel->is_send_running.load()){
+            if(!is_cv_running.load() || filters.none.load()){
+                //if(this->id == 0) qDebug() << "no pass, first: " << !is_cv_running.load() << " second: " << filters.none.load();
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 continue;
             }
@@ -263,35 +274,37 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
                 compressed_data = latest_compressed;
             }
             if(compressed_data.empty()){
+                qDebug() << "empty compressed";
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 continue;
             }
-            unsigned char marker = 0x00;
+            int marker = 0;
             if(filters.is_qr_active.load())
-                marker = 0x01;
+                marker = 1;
             else if(filters.is_hazmat_active.load())
-                marker = 0x02;
+                marker = 2;
             else if(filters.is_shape_active.load())
-                marker = 0x03;
+                marker = 3;
             else if(filters.is_circles1_active.load())
-                marker = 0x04;
+                marker = 4;
             else if(filters.is_circles2_active.load())
-                marker = 0x05;
+                marker = 5;
             else{
-                qWarning() << "Filter socket called with no active filter";
+                qWarning() << "SUBSECTION " << this->id << " LOOP | Invalid marker: no active filter";
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 continue;
             }
-            compressed_data.insert(compressed_data.begin(), marker);
-            filter_socket->target_socket->sendPacket(compressed_data);
+            filter_channel->target_socket->sendPacket(compressed_data, marker);
+            //qDebug() << "sending " << compressed_data.size() << " bytes, marker: " << marker;
         }
     });
-    filter_socket->recv_thread = std::thread([this](){
-        while(filter_socket->is_recv_running.load()){
+    filter_channel->recv_thread = std::thread([this](){
+        while(filter_channel->is_recv_running.load()){
             if(!is_cv_running.load()){
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 continue;
             }
-            filter_socket->target_socket->recvPacket();
+            filter_channel->target_socket->recvPacket();
         }
     });
     connect(camera_dropdown,  &QComboBox::currentIndexChanged, this, [this](int index){
@@ -299,18 +312,15 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
         emit selectionChanged();
         if(index == 0){
             this->updateFrame(cv::imread("../../assets/404.png"));
-        }
-    });
-    connect(filter_dropdown, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index){
-        if(camera_dropdown->currentIndex() == 0){
-            filter_dropdown->blockSignals(true);
             filter_dropdown->setCurrentIndex(0);
-            filter_dropdown->blockSignals(false);
-            is_cv_running.store(false);
+            filter_dropdown->setEnabled(false);
         }
-        else{
-            is_cv_running.store(true);
-        }
+        else
+            filter_dropdown->setEnabled(true);
+    });
+    connect(filter_dropdown, &QComboBox::currentIndexChanged, this, [this](int index){
+        qDebug() << "filter dropdown: " << index << " other: " << camera_dropdown->currentIndex();
+        is_cv_running.store(index > 0);
         filters.none.store(index == 0);
         filters.is_qr_active.store(index == 1);
         filters.is_hazmat_active.store(index == 2);
@@ -399,20 +409,25 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
         if(!image.isNull())
             cameraView->setPixmap(QPixmap::fromImage(qt_frame).scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
         else
-            qDebug() << "Image is null after conversion!";
+            qCritical() << "SUBSECTION " << this->id << " FRAME READY | Invalid image: frame is null";
     });
 }
 
 SubsectionWidget::~SubsectionWidget(){
+    camera_dropdown->setCurrentIndex(0);
     filters.none.store(true);
     is_cv_running.store(false);
-    filter_socket->is_active.store(false);
-    filter_socket->is_recv_running.store(false);
-    filter_socket->is_send_running.store(false);
+    filter_channel->is_active.store(false);
+    filter_channel->is_recv_running.store(false);
+    filter_channel->is_send_running.store(false);
     emit destructorCalled(id);
     if(cv_thread.joinable()) cv_thread.join();
-    if(id == 0)
-        filter_socket->target_socket->sendPacket(std::vector<uchar>{0x00});
+    if(this->id == 0){
+        for(int i = 0; i < 10; i++){
+            filter_channel->target_socket->sendPacket(std::vector<uchar>{0x00}, 0);
+        }
+    }
+    filter_channel->target_socket->destroy();
 }
 
 void SubsectionWidget::updateAvailableOptions(const QSet<QString> &usedOptions) {
@@ -447,8 +462,10 @@ void SubsectionWidget::updateFrame(cv::Mat frame, std::vector<uchar> compressed)
     }
     if(!filters.none.load()){
         std::lock_guard<std::mutex> lock(filter_mutex);
-        if(!filter_frame.empty())
+        if(!filter_frame.empty()){
+            qDebug() << "grabbed filter frame";
             frame = filter_frame;
+        }
     }
     if(!frame.empty() && frame.data != nullptr && frame.cols > 0 && frame.rows > 0) {
         if(frame.type() != CV_8UC3)
@@ -457,18 +474,9 @@ void SubsectionWidget::updateFrame(cv::Mat frame, std::vector<uchar> compressed)
         QImage image(frame.data, frame.cols, frame.rows, frame.step, QImage::Format_RGB888);
         qt_frame = image.copy();  // ????????????????
         emit frameReady(qt_frame);
-
-        /*
-        if(!image.isNull())
-            cameraView->setPixmap(QPixmap::fromImage(qt_frame).scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
-        else
-            qDebug() << "Image is null after conversion!";
-        */
     }
     else
-        qDebug() << "Invalid frame: empty or corrupt";
-    //QImage image(frame.data, frame.cols, frame.rows, frame.step, QImage::Format_RGB888);
-    //cameraView->setPixmap(QPixmap::fromImage(image).scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
+        qWarning() << "SUBSECTION " << this->id << " UPDATE | Invalid frame: empty or corrupt";
 }
 
 void SubsectionWidget::mousePressEvent(QMouseEvent *event) {
@@ -495,7 +503,9 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     for(int i = 0; i < 2; i++) {
         for(int j = 0; j < 2; j++){
             cam_map.insert({subsections.size(), -1});
-            SubsectionWidget *widget = new SubsectionWidget(id++, this);
+            SubsectionWidget* widget = new SubsectionWidget(id, this);
+            qDebug() << "pass";
+            id++;
             connect(widget, &SubsectionWidget::subsectionClicked, this, [this](SubsectionWidget* clicked_widget){
                 if(!is_fullscreen){
                     for(int k = 0; k < subsections.size(); k++){
@@ -647,7 +657,7 @@ template<typename T> void MainWindow::updateDashbord(int index, T data){
             magnetometer_label->setText(QString("X: %1 Y: %2\nZ: %3").arg(data.x(), 0, 'f', 2).arg(data.y(), 0, 'f', 2).arg(data.z(), 0, 'f', 2));
     }
     else
-        qWarning() << "Failed to update dashboard. Out of bounds";
+        qWarning() << "WINDOW UPDATE | Invalid dashboard index: out of bounds";
 }
 
 // SIGNAL INTERCEPT
@@ -659,6 +669,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         subsections[i]->destroy();
     }
     event->accept();
+    WSACleanup();
     qInfo() << "Bye";
 }
 
@@ -888,15 +899,15 @@ void RTPStreamHandler::recvPacket(){
     int i = 0, num_fragments = -1, ssrc = -1;
     do{
         int bytes_received = recvfrom(recv_socket, buffer.data(), MAX_PACKET_SIZE, 0, (struct sockaddr*)&recv_socket_address, &socket_address_size);
-        qDebug() << "bytes received: " << bytes_received;
+        //qDebug() << "bytes received: " << bytes_received;
         if(bytes_received == SOCKET_ERROR){
             int error = WSAGetLastError();
             if(error != 10004)
-                qCritical() << "Packet recv failed. Winsock error: " << error;
+                qCritical() << "ROTAS RECV | Winsock error: " << error;
             return;
         }
         else if (bytes_received < sizeof(RTPHeader)) {
-            qCritical() << "Received incomplete RTP header.";
+            qCritical() << "ROTAS RECV | Invalid RTP header: incomplete packet received";
             return;
         }
 
@@ -912,7 +923,7 @@ void RTPStreamHandler::recvPacket(){
             fragments.resize(num_fragments);
         }
         else if(ssrc != header->ssrc){
-            qWarning() << "Packet fragmentation error. Previous packet dropped";
+            qWarning() << "ROTAS RECV | Fragmentation error: previous packet dropped";
             i = 0;
             fragments.clear();
             num_fragments = header->m;
@@ -942,7 +953,7 @@ void RTPStreamHandler::recvPacket(){
         ucharCallback(data);
     }
     else
-        qCritical() << "Payload / Callback error on packet recv";
+        qCritical() << "ROTAS RECV | Invalid packet data: mismatched payload/callback";
 
     /*
     std::vector<char> packet(MAX_PACKET_SIZE);
@@ -1036,28 +1047,31 @@ template <typename T> void RTPStreamHandler::sendPacket(std::vector<T> data){
 AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
     qInfo() << "Starting GUI...";
     window = new MainWindow;
-    window->setWindowTitle("GUI - alpha");
+    window->setWindowTitle("GUI - beta");
     window->resize(1280, 720);
     QObject::connect(window, &MainWindow::windowClosing, [this](){ this->destroy(); });
     this->port = port;
-    qInfo() << "Starting base stream handler...";
-    base_socket = new SocketStruct;
-    base_socket->target_socket = new RTPStreamHandler(port, CLIENT_IP, PayloadType::ROS2_ARRAY);
-    base_socket->target_socket->setFloatCallback([this](std::vector<float> data){
+
+    qInfo() << "Starting base channel...";
+    base_channel = new SocketStruct;
+    base_channel->target_socket = new RTPStreamHandler(port, CLIENT_IP, PayloadType::ROS2_ARRAY);
+    base_channel->target_socket->setFloatCallback([this](std::vector<float> data){
         window->updateState(data);
-        base_socket->float_data = data;
+        base_channel->float_data = data;
     });
-    base_socket->is_recv_running.store(true);
-    base_socket->is_send_running.store(true);
-    audio_socket = new SocketStruct;
-    audio_socket->target_socket = new RTPStreamHandler(port + 2, CLIENT_IP, PayloadType::AUDIO_PCM);
-    audio_socket->target_socket->setUCharCallback([this](std::vector<uchar> data){
+    base_channel->is_recv_running.store(true);
+    base_channel->is_send_running.store(true);
+
+    qInfo() << "Starting audio channel...";
+    audio_channel = new SocketStruct;
+    audio_channel->target_socket = new RTPStreamHandler(port + 2, CLIENT_IP, PayloadType::AUDIO_PCM);
+    audio_channel->target_socket->setUCharCallback([this](std::vector<uchar> data){
         std::vector<opus_int16> output(AUDIO_BUFFER_SIZE);
         int frames = opus_decode(opus_decoder, data.data(), data.size(), output.data(), output.size(), 0);
         Pa_WriteStream(stream, output.data(), frames);
     });
-    audio_socket->is_recv_running.store(true);
-    audio_socket->is_send_running.store(true);
+    audio_channel->is_recv_running.store(true);
+    audio_channel->is_send_running.store(true);
     opus_decoder = opus_decoder_create(SAMPLE_RATE, 1, &pa_error);
     Pa_Initialize();
     Pa_OpenDefaultStream(&stream, 0, 1, paInt16, SAMPLE_RATE, AUDIO_BUFFER_SIZE, nullptr, nullptr);
@@ -1065,12 +1079,12 @@ AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
     connect(window, &MainWindow::buttonChanged, this, [this](bool is_pressed){ is_audio_active.store(is_pressed); });
     qRegisterMetaType<std::map<int, int>>("std::map<int,int>");
     connect(window, &MainWindow::selectionChanged, this, [this](std::map<int,int> cam_map){
-        for(int i = 0; i < video_sockets.size(); i++){
-            video_sockets[i]->is_active.store(false);
+        for(int i = 0; i < video_channels.size(); i++){
+            video_channels[i]->is_active.store(false);
         }
         for(auto it = cam_map.begin(); it != cam_map.end(); it++){
             if(it->second >= 0)
-                video_sockets[it->second]->is_active.store(true);
+                video_channels[it->second]->is_active.store(true);
         }
     });
     qInfo() << "Setup complete";
@@ -1078,54 +1092,55 @@ AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
 
 AppHandler::~AppHandler(){
     qInfo() << "Closing program...";
-    base_socket->target_socket->sendPacket(std::vector<int>{0, -1});
-    base_socket->is_recv_running.store(false);
-    base_socket->is_send_running.store(false);
-    base_socket->target_socket->destroy();
-    if(base_socket->send_thread.joinable())
-        base_socket->send_thread.join();
-    if(base_socket->recv_thread.joinable())
-        base_socket->recv_thread.join();
+    base_channel->target_socket->sendPacket(std::vector<int>{0, -1});
+    base_channel->is_recv_running.store(false);
+    base_channel->is_send_running.store(false);
+    base_channel->target_socket->destroy();
+    if(base_channel->send_thread.joinable())
+        base_channel->send_thread.join();
+    if(base_channel->recv_thread.joinable())
+        base_channel->recv_thread.join();
     qInfo() << "Base channel closed";
-    audio_socket->is_recv_running.store(false);
-    audio_socket->is_send_running.store(false);
-    audio_socket->target_socket->destroy();
-    if(audio_socket->recv_thread.joinable())
-        audio_socket->recv_thread.join();
-    if(audio_socket->send_thread.joinable())
-        audio_socket->send_thread.join();
+
+    audio_channel->is_recv_running.store(false);
+    audio_channel->is_send_running.store(false);
+    audio_channel->target_socket->destroy();
+    if(audio_channel->recv_thread.joinable())
+        audio_channel->recv_thread.join();
+    if(audio_channel->send_thread.joinable())
+        audio_channel->send_thread.join();
     Pa_StopStream(stream);
     Pa_CloseStream(stream);
     Pa_Terminate();
     opus_decoder_destroy(opus_decoder);
     qInfo() << "Audio channel closed";
-    for(int i = 0; i < video_sockets.size(); i++){
-        video_sockets[i]->is_recv_running.store(false);
-        video_sockets[i]->is_send_running.store(false);
-        video_sockets[i]->target_socket->destroy();
-        if(video_sockets[i]->recv_thread.joinable())
-            video_sockets[i]->recv_thread.join();
-        if(video_sockets[i]->send_thread.joinable())
-            video_sockets[i]->send_thread.join();
+
+    for(int i = 0; i < video_channels.size(); i++){
+        video_channels[i]->is_recv_running.store(false);
+        video_channels[i]->is_send_running.store(false);
+        video_channels[i]->target_socket->destroy();
+        if(video_channels[i]->recv_thread.joinable())
+            video_channels[i]->recv_thread.join();
+        if(video_channels[i]->send_thread.joinable())
+            video_channels[i]->send_thread.join();
     }
     qInfo() << "Video channels closed";
-    WSACleanup();
 }
 
 void AppHandler::init(){
     qInfo() << "Starting ROTAS stream...";
-    int num_cams = 0;
 
-    // handshake
-    base_socket->target_socket->sendPacket(std::vector<int>{0, 0});
-    base_socket->target_socket->recvPacket();
+    int num_cams = 0;
+    base_channel->target_socket->sendPacket(std::vector<int>{0, 0});
+    qInfo() << "Awaiting response...";
+    base_channel->target_socket->recvPacket();
     {
-        std::lock_guard<std::mutex> lock(base_socket->data_mutex);
-        if(base_socket->float_data.empty() || base_socket->float_data[0] < 0){
-            qCritical() << "Base handshake failed";
+        std::lock_guard<std::mutex> lock(base_channel->data_mutex);
+        if(base_channel->float_data.empty() || base_channel->float_data[0] < 0){
+            qCritical() << "APPHANDLER INIT | Base handshake failed";
             return;
         }
-        num_cams = (int)base_socket->float_data[0];
+        num_cams = (int)base_channel->float_data[0];
     }
     qInfo() << "Connection established. Received " << num_cams << " video sources";
 
@@ -1133,34 +1148,34 @@ void AppHandler::init(){
     for(int i = 0; i < num_cams; i++){
         SocketStruct* video_socket = new SocketStruct;
         video_socket->target_socket = new RTPStreamHandler(port + (2 * i) + 4, CLIENT_IP, PayloadType::VIDEO_MJPEG);
-        video_sockets.push_back(std::move(video_socket));
+        video_channels.push_back(std::move(video_socket));
     }
-    for(int i = 0; i < video_sockets.size(); i++){
-        video_sockets[i]->is_active.store(false);
-        video_sockets[i]->is_send_running.store(true);
-        video_sockets[i]->is_recv_running.store(true);
-        video_sockets[i]->target_socket->setUCharCallback([this, i](std::vector<uchar> data) { window->updateFrame(i, data); });
-        video_sockets[i]->recv_thread = std::thread([i, this](){
-            while(video_sockets[i]->is_recv_running.load()){
-                video_sockets[i]->target_socket->recvPacket();
+    for(int i = 0; i < video_channels.size(); i++){
+        video_channels[i]->is_active.store(false);
+        video_channels[i]->is_send_running.store(true);
+        video_channels[i]->is_recv_running.store(true);
+        video_channels[i]->target_socket->setUCharCallback([this, i](std::vector<uchar> data) { window->updateFrame(i, data); });
+        video_channels[i]->recv_thread = std::thread([i, this](){
+            while(video_channels[i]->is_recv_running.load()){
+                video_channels[i]->target_socket->recvPacket();
             }
         });
-        video_sockets[i]->send_thread = std::thread([i, this](){
-            while(video_sockets[i]->is_send_running.load()){
-                video_sockets[i]->target_socket->sendPacket(std::vector<int>{0, (int)video_sockets[i]->is_active.load()});
+        video_channels[i]->send_thread = std::thread([i, this](){
+            while(video_channels[i]->is_send_running.load()){
+                video_channels[i]->target_socket->sendPacket(std::vector<int>{0, (int)video_channels[i]->is_active.load()});
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
         });
     }
     Pa_StartStream(stream);
-    audio_socket->recv_thread = std::thread([this](){
-        while(audio_socket->is_recv_running.load()){
-            audio_socket->target_socket->recvPacket();
+    audio_channel->recv_thread = std::thread([this](){
+        while(audio_channel->is_recv_running.load()){
+            audio_channel->target_socket->recvPacket();
         }
     });
-    audio_socket->send_thread = std::thread([this](){
-        while(audio_socket->is_send_running.load()){
-            audio_socket->target_socket->sendPacket(std::vector<int>{0, (int)is_audio_active.load()});
+    audio_channel->send_thread = std::thread([this](){
+        while(audio_channel->is_send_running.load()){
+            audio_channel->target_socket->sendPacket(std::vector<int>{0, (int)is_audio_active.load()});
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     });

@@ -125,7 +125,7 @@ public:
     void destroy(){ delete this; }
     static int audioCallback(const void* input, void* output, unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags, void* userData);
     int audioProcess(const void* input, void* output, unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags);
-    template <typename T> void sendPacket(std::vector<T> data){
+    template <typename T> void sendPacket(std::vector<T> data, int marker = 0){
         // --- Initial settings ---
         int max_size = MAX_UDP_PACKET_SIZE - sizeof(RTPHeader);
         int num_fragments = ((data.size()*sizeof(T)) + max_size - 1) / max_size;
@@ -145,7 +145,7 @@ public:
             header.cc = 0;
             header.m = (uint16_t)num_fragments;
             header.pt = 0;
-            header.timestamp = 0;
+            header.timestamp = (uint16_t)marker;
             header.ssrc = ssrc;
             header.seq = (uint16_t)i;
             if(num_fragments > 1)
@@ -157,7 +157,7 @@ public:
             std::memcpy(packet.data() + sizeof(RTPHeader), data.data() + (i*max_size), current_size);
 
             if(sendto(send_socket, (const char*)packet.data(), packet.size(), 0, (struct sockaddr*)&send_socket_address, socket_address_size) == SOCKET_ERROR){
-                qWarning() << "Packet send failed on fragment " << i << ". Winsock error: " << WSAGetLastError();
+                qWarning() << "ROTAS SEND | Winsock error: " << WSAGetLastError();
             }
         }
     }
@@ -259,7 +259,7 @@ private:
     std::thread cv_thread;
     std::atomic<bool> is_cv_running;
     QImage qt_frame;
-    SocketStruct* filter_socket;
+    SocketStruct* filter_channel;
 };
 
 class MainWindow : public QWidget{
@@ -306,13 +306,13 @@ public:
     void destroy(){ delete this; }
 private:
     PaError PaErrorCallback(const char *errorText, PaHostApiTypeId hostApiType, PaHostErrorInfo* hostErrorInfo){ return 0; }
-    SocketStruct* base_socket;
-    std::vector<SocketStruct*> video_sockets;
+    SocketStruct* base_channel;
+    std::vector<SocketStruct*> video_channels;
     std::atomic<bool> is_audio_active;
     int port;
     int pa_error;
     MainWindow* window;
-    SocketStruct* audio_socket;
+    SocketStruct* audio_channel;
     OpusDecoder* opus_decoder;
     PaStream* stream;
 };
