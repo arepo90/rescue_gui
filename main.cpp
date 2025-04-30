@@ -18,6 +18,9 @@
 #include "mainwindow.h"
 #include <QApplication>
 
+/*
+*/
+
 // WORK IN PROGRESS OK ?😭😭😭😭😭
 
 // --- tests n stuff ---
@@ -437,6 +440,30 @@ cv::Mat detectShapeExp(cv::Mat frame){
 }
 */
 
+#include <dxgidebug.h>
+#pragma comment(lib, "dxguid.lib")
+
+void reportLiveD3DObjects()
+{
+    typedef HRESULT(WINAPI* LPDXGIGETDEBUGINTERFACE)(REFIID, void**);
+    HMODULE dxgidebug = LoadLibraryA("dxgidebug.dll");
+    if (dxgidebug)
+    {
+        LPDXGIGETDEBUGINTERFACE dxgiGetDebugInterface =
+            (LPDXGIGETDEBUGINTERFACE)GetProcAddress(dxgidebug, "DXGIGetDebugInterface");
+
+        IDXGIDebug* dxgiDebug = nullptr;
+        if (dxgiGetDebugInterface &&
+            SUCCEEDED(dxgiGetDebugInterface(__uuidof(IDXGIDebug), (void**)&dxgiDebug)))
+        {
+            dxgiDebug->ReportLiveObjects(DXGI_DEBUG_ALL, DXGI_DEBUG_RLO_DETAIL);
+            dxgiDebug->Release();
+        }
+
+        FreeLibrary(dxgidebug);
+    }
+}
+
 int main(int argc, char* argv[]){
     QApplication app(argc, argv);
 
@@ -503,5 +530,7 @@ int main(int argc, char* argv[]){
     AppHandler* app_handler = new AppHandler(8000);
     app_handler->init();
 
-    return app.exec();
+    int res = app.exec();
+    reportLiveD3DObjects();
+    return res;
 }

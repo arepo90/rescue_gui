@@ -32,11 +32,10 @@
 
 #include <portaudio.h>
 #include <opencv2/opencv.hpp>
-#include <opencv2/dnn.hpp>
+#include <opencv2/objdetect.hpp>
 #include <opus/opus.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <iostream>
 #include <vector>
 #include <thread>
 #include <atomic>
@@ -44,16 +43,15 @@
 #include <cstdint>
 #include <Xinput.h>
 #include <windows.h>
-
+#include <iostream>
 #pragma comment(lib, "ws2_32.lib")
 
-#define AUDIO_BUFFER_SIZE 2880
-#define SAMPLE_RATE 48000
-#define MAX_PACKET_SIZE 65536
+#define AUDIO_BUFFER_SIZE 960       // 960 bytes
+#define SAMPLE_RATE 16000           // 16 kHz
+#define MAX_PACKET_SIZE 65536       // 65539 bytes
 #define CLIENT_IP "127.0.0.1"
-#define FRAGMENTATION_FLAG 0x8000
-#define MAX_UDP_PACKET_SIZE 65507   // 65507 bytes ~= 65.5 kB
-#define FRAGMENTATION_FLAG 0x8000
+#define MAX_UDP_PACKET_SIZE 65507   // 65507 bytes
+#define FRAGMENTATION_FLAG 0x8000   // RTP Header flag
 
 enum PACKET_TYPE{ SETUP = 0, AUDIO = 1, VIDEO = 2 };
 
@@ -69,13 +67,33 @@ struct RTPHeader {
     uint16_t ssrc;
 };
 
+struct BasePacket{
+    float body_x = 0;
+    float body_y = 0;
+    float body_z = 0;
+    float arm_l = 0;
+    float arm_r = 0;
+    float art_1 = 0;
+    float art_2 = 0;
+    float art_3 = 0;
+    float art_4 = 0;
+    float track_l = 0;
+    float track_r = 0;
+    float magnetometer_x = 0;
+    float magnetometer_y = 0;
+    float magnetometer_z = 0;
+    float gas_ppm = 0;
+};
+
 enum class PayloadType : uint8_t{
     VIDEO_MJPEG = 97,
     AUDIO_PCM = 98,
     ROS2_ARRAY = 99
 };
 
-int nMap(int n, int minIn, int maxIn, int minOut, int maxOut);
+//std::map<int, std::string> payload_string = {{97, "VIDEO"}, {98, "AUDIO"}, {99, "GNRL DATA"}};
+
+int nMap(float n, float minIn, float maxIn, float minOut, float maxOut);
 
 class ConsoleWindow : public QMainWindow{
     Q_OBJECT
@@ -100,12 +118,14 @@ class ModelWidget : public QWidget{
     Q_OBJECT
 public:
     explicit ModelWidget(QWidget *parent = nullptr);
+    ~ModelWidget();
     void updatePivot(int index, int axis, float angle);
     void updateModel(float angleX, float angleY, float angleZ);
     void updateColor(int index, QColor color);
+    void destroy(){ delete this; }
 private:
     void loadModels();
-    Qt3DCore::QEntity* root;
+    Qt3DCore::QEntity* root = nullptr;
     QWidget* container;
     Qt3DExtras::Qt3DWindow* viewport;
     std::vector<Qt3DCore::QEntity*> parts;
@@ -125,42 +145,7 @@ public:
     void destroy(){ delete this; }
     static int audioCallback(const void* input, void* output, unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags, void* userData);
     int audioProcess(const void* input, void* output, unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags);
-    template <typename T> void sendPacket(std::vector<T> data, int marker = 0){
-        // --- Initial settings ---
-        int max_size = MAX_UDP_PACKET_SIZE - sizeof(RTPHeader);
-        int num_fragments = ((data.size()*sizeof(T)) + max_size - 1) / max_size;
-        // -- (Pseudo)random ssrc --
-        thread_local uint16_t ssrc = 1;
-        ssrc ^= ssrc << 7;
-        ssrc ^= ssrc >> 9;
-        ssrc ^= ssrc << 8;
-
-        // --- Fragment setup ---
-        for(int i = 0; i < num_fragments; i++){
-            // -- RTP header info --
-            RTPHeader header;
-            header.version = 2;
-            header.p = 0;
-            header.x = 0;
-            header.cc = 0;
-            header.m = (uint16_t)num_fragments;
-            header.pt = 0;
-            header.timestamp = (uint16_t)marker;
-            header.ssrc = ssrc;
-            header.seq = (uint16_t)i;
-            if(num_fragments > 1)
-                header.seq |= FRAGMENTATION_FLAG;
-            // -- Merge header + packet --
-            int current_size = (max_size < ((data.size()*sizeof(T)) - (i*max_size)) ? max_size : (data.size()*sizeof(T)) - (i*max_size));
-            std::vector<char> packet(current_size + sizeof(RTPHeader));
-            std::memcpy(packet.data(), &header, sizeof(RTPHeader));
-            std::memcpy(packet.data() + sizeof(RTPHeader), data.data() + (i*max_size), current_size);
-
-            if(sendto(send_socket, (const char*)packet.data(), packet.size(), 0, (struct sockaddr*)&send_socket_address, socket_address_size) == SOCKET_ERROR){
-                qWarning() << "ROTAS SEND | Winsock error: " << WSAGetLastError();
-            }
-        }
-    }
+    template <typename T> void sendPacket(std::vector<T> data, int marker = 0);
     void recvPacket();
 private:
     struct Stream{
@@ -216,10 +201,15 @@ public:
     ~SubsectionWidget();
     void destroy(){ delete this; }
     void setAvailableDevices(int num_cams);
-    void setFullScreenMode(bool fullScreen){ this->fullScreen = fullScreen; }
+    void setFullScreenMode(bool fullScreen){
+        this->fullScreen = fullScreen;
+        QPixmap current = camera_view->pixmap();
+        camera_view->setPixmap(current.scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
+    }
     void updateAvailableOptions(const QSet<QString> &usedOptions);
     std::pair<int, QString> getCurrentSelection(){ return std::make_pair(cam_id, camera_dropdown->currentText()); }
     void updateFrame(cv::Mat frame, std::vector<uchar> compressed = {});
+    void setLocal(bool is_pressed){ this->is_local.store(is_pressed); }
 signals:
     void subsectionClicked(SubsectionWidget *widget);
     void selectionChanged();
@@ -235,29 +225,36 @@ private:
         std::atomic<bool> is_shape_active;
         std::atomic<bool> is_circles1_active;
         std::atomic<bool> is_circles2_active;
-        cv::QRCodeDetector qr_decoder;
+        cv::Mat placeText(std::string text, cv::Mat frame);
+        cv::Mat detectQR(cv::Mat frame);
+        cv::Mat detectShape(cv::Mat frame);
+        cv::Mat detectCircles1(cv::Mat frame);
+        cv::Mat detectCircles2(cv::Mat frame);
     };
     Filters filters;
     QComboBox *camera_dropdown;
     QComboBox *filter_dropdown;
     int cam_id;
     int id;
-    QLabel* cameraView;
+    int num_cams;
+    QLabel* camera_view;
     QVBoxLayout* layout;
     QHBoxLayout* dropdowns;
     QWidget* container;
     std::vector<int> availableDevices;
     bool fullScreen = false;
-    std::atomic<bool> is_active;
+    std::atomic<bool> is_local;
+    std::atomic<bool> is_cv_running;
     std::mutex frame_mutex;
     std::mutex filter_mutex;
     std::mutex compressed_mutex;
+    std::mutex thermal_mutex;
     cv::Mat latest_frame;
     cv::Mat filter_frame;
     std::vector<uchar> latest_compressed;
     std::vector<cv::Point> filter_points;
+    std::vector<float> thermal_data;
     std::thread cv_thread;
-    std::atomic<bool> is_cv_running;
     QImage qt_frame;
     SocketStruct* filter_channel;
 };
@@ -274,25 +271,28 @@ signals:
     void windowClosing();
     void selectionChanged(std::map<int, int> cam_map);
     void buttonChanged(bool is_active);
+    void localChanged(bool is_active);
     void destructorCalled(int id);
 protected:
     void closeEvent(QCloseEvent *event) override;
 private:
     QHBoxLayout* main_layout;
+    QHBoxLayout* button_layout;
     QGridLayout* left_layout;
     QGridLayout* dashboard_layout;
     QVBoxLayout* right_layout;
     QWidget* left_container;
     QLabel* sensor_label;
     QLabel* gas_label;
-    QLabel* qr_label;
     QLabel* speech_label;
     QLabel* magnetometer_label;
     QPushButton* microphone_button;
     QPushButton* clear_button;
+    QPushButton* local_button;
+    SubsectionWidget* fullscreen_widget = nullptr;
     std::vector<SubsectionWidget*> subsections;
     bool is_fullscreen;
-    ModelWidget* model;
+    ModelWidget* model = nullptr;
     std::vector<int> scanVideoCaptureDevices();
     std::map<int, int> cam_map;
 };
@@ -307,57 +307,15 @@ public:
 private:
     PaError PaErrorCallback(const char *errorText, PaHostApiTypeId hostApiType, PaHostErrorInfo* hostErrorInfo){ return 0; }
     SocketStruct* base_channel;
+    SocketStruct* audio_channel;
+    SocketStruct* vosk_channel;
     std::vector<SocketStruct*> video_channels;
     std::atomic<bool> is_audio_active;
     int port;
     int pa_error;
     MainWindow* window;
-    SocketStruct* audio_channel;
     OpusDecoder* opus_decoder;
     PaStream* stream;
 };
-
-
-// --- DEPRECATED CLASS - USE RTPSTREAMHANDLER INSTEAD ---
-/*
-class RTPServer : public QObject{
-    Q_OBJECT
-template <typename T>
-using DataCallback = std::function<void(const std::vector<T>&)>;
-public:
-    RTPServer(int port, PayloadType type, QObject *parent = nullptr);
-    ~RTPServer();
-    void setFloatCallback(std::function<void(std::vector<float>)> cb) { callback = cb; }
-    void setUCharCallback(DataCallback<uchar> callback){ ucharCallback = callback; }
-    void destroy(){ delete this; }
-    static int audioCallback(const void* input, void* output, unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags, void* userData);
-    int audioProcess(const void* input, void* output, unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags);
-    void sendPacket(std::vector<int> data);
-    void startListening();
-private slots:
-    std::vector<int> handshake();
-private:
-    struct Stream {
-        uint32_t ssrc;
-        uint16_t seq_num;
-        PayloadType type;
-        std::mutex frame_mutex;
-        bool is_initialized;
-    };
-    DataCallback<float> floatCallback;
-    DataCallback<uchar> ucharCallback;
-    SOCKET client_socket;
-    sockaddr_in socket_address;
-    int socket_address_size = sizeof(socket_address);
-    PACKET_TYPE packet_type;
-    std::thread listening_thread;
-    std::atomic<bool> is_running;
-    Stream* stream;
-    OpusDecoder* opus_decoder;
-    RTPHeader* header;
-    std::function<void(std::vector<float>)> callback;
-};
-*/
-
 
 #endif

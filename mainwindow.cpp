@@ -1,11 +1,8 @@
 #include "mainwindow.h"
 
 // --- Helper funcs ---
-int nMap(int n, int minIn, int maxIn, int minOut, int maxOut){
-    return float((n - minIn)) / float((maxIn - minIn)) * (maxOut - minOut) + minOut;
-}
 int nMap(float n, float minIn, float maxIn, float minOut, float maxOut){
-    return float((n - minIn)) / float((maxIn - minIn)) * (maxOut - minOut) + minOut;
+    return (n - minIn) / (maxIn - minIn) * (maxOut - minOut) + minOut;
 }
 
 // --- Controller (xbox) WIP ---
@@ -74,6 +71,13 @@ ModelWidget::ModelWidget(QWidget *parent) : QWidget(parent){
     QTimer* timer = new QTimer(this);
     connect(timer, &QTimer::timeout, this, [this](){ container->update(); });
     timer->start(1000);
+}
+
+ModelWidget::~ModelWidget(){
+    if(root){
+        delete root;
+        root = nullptr;
+    }
 }
 
 void ModelWidget::loadModels(){
@@ -215,28 +219,36 @@ void ModelWidget::updateColor(int index, QColor color){
     band_colors[index]->setDiffuse(color);
 }
 
+cv::Mat SubsectionWidget::Filters::placeText(std::string text, cv::Mat frame){
+    int temp = 0;
+    cv::Size text_size = cv::getTextSize(text,  cv::FONT_HERSHEY_SIMPLEX, 3.5, 3, &temp);
+    cv::putText(frame, text, cv::Point((frame.cols - text_size.width)/2, (frame.rows + text_size.height)/2),  cv::FONT_HERSHEY_SIMPLEX, 3.5, cv::Scalar(255, 0, 0), 3);
+    return frame;
+}
+
 // --- cam subsections ---
 SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
+    is_local.store(false);
     this->id = id;
     container = new QWidget(this);
     layout = new QVBoxLayout();
     dropdowns = new QHBoxLayout();
-    cameraView = new QLabel();
+    camera_view = new QLabel();
     camera_dropdown = new QComboBox();
     camera_dropdown->addItem("No Camera");
     filter_dropdown = new QComboBox();
     filter_dropdown->addItems({ "No filter", "QR Code", "Hazmat", "Shape - Hough", "Circles - Gap", "Circles - Rays" });
+    filter_dropdown->setEnabled(false);
     cam_id = -1;
     dropdowns->addWidget(camera_dropdown);
     dropdowns->addWidget(filter_dropdown);
     layout->addLayout(dropdowns);
-    layout->addWidget(cameraView);
+    layout->addWidget(camera_view);
     layout->setSpacing(0);
     layout->setContentsMargins(0, 0, 0, 0);
     container->setLayout(layout);
     container->setStyleSheet("border: 0.5px solid gray;");
-    is_active.store(false);
-    is_cv_running.store(false);
+    is_cv_running.store(true);
     filters.none.store(true);
     filters.is_qr_active.store(false);
     filters.is_shape_active.store(false);
@@ -245,17 +257,57 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     filters.is_hazmat_active.store(false);
     filter_channel = new SocketStruct;
     filter_channel->target_socket = new RTPStreamHandler(9000 + id*2, "127.0.0.1", PayloadType::VIDEO_MJPEG);
-    qDebug() << "successful handler id: " << id;
     filter_channel->is_recv_running.store(true);
     filter_channel->is_send_running.store(true);
     long long start = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+
+    cv_thread = std::thread([this](){
+        while(is_cv_running.load()){
+            if(!is_local.load()){
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                continue;
+            }
+            if(filters.none.load()){
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                continue;
+            }
+            cv::Mat frame;
+            {
+                std::lock_guard<std::mutex> lock(frame_mutex);
+                frame = latest_frame;
+            }
+            if(frame.empty()){
+                qDebug() << "empty frame";
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                continue;
+            }
+            if(filters.is_qr_active.load())
+                frame = filters.detectQR(frame);
+            else if(filters.is_hazmat_active.load())
+                frame = filters.placeText("HAZMAT NOT AVAILABLE LOCALLY", frame);
+            else if(filters.is_shape_active.load())
+                frame = filters.detectShape(frame);
+            else if(filters.is_circles1_active.load())
+                frame = filters.detectCircles1(frame);
+            else if(filters.is_circles2_active.load())
+                frame = filters.detectCircles2(frame);
+            else{
+                qWarning() << "SUBSECTION " << this->id << " CV LOOP | Invalid marker: no active filter";
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                continue;
+            }
+            {
+                std::lock_guard<std::mutex> lock(filter_mutex);
+                filter_frame = frame;
+            }
+        }
+    });
     filter_channel->target_socket->setUCharCallback([this, id, start](std::vector<uchar> data){
         if(data.empty()){
-            qCritical() << "SUBSECTION " << this->id << " FILTER CALLBACK | Invalid payload: data buffer empty";
+            qCritical() << "SUBSECTION " << this->id << " PY CALLBACK | Invalid payload: data buffer empty";
             return;
         }
         auto curr = std::chrono::high_resolution_clock::now();
-        qDebug() << "updating filter frame, size: " << data.size() << " at " << std::chrono::duration_cast<std::chrono::milliseconds>(curr.time_since_epoch()).count() - start;
         cv::Mat frame = cv::imdecode(data, cv::IMREAD_COLOR);
         cv::cvtColor(frame, frame, cv::COLOR_BGR2RGB);
         std::lock_guard<std::mutex> lock(filter_mutex);
@@ -263,8 +315,11 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     });
     filter_channel->send_thread = std::thread([this](){
         while(filter_channel->is_send_running.load()){
-            if(!is_cv_running.load() || filters.none.load()){
-                //if(this->id == 0) qDebug() << "no pass, first: " << !is_cv_running.load() << " second: " << filters.none.load();
+            if(is_local.load()){
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                continue;
+            }
+            if(filters.none.load()){
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 continue;
             }
@@ -290,7 +345,7 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
             else if(filters.is_circles2_active.load())
                 marker = 5;
             else{
-                qWarning() << "SUBSECTION " << this->id << " LOOP | Invalid marker: no active filter";
+                qWarning() << "SUBSECTION " << this->id << " PY LOOP | Invalid marker: no active filter";
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 continue;
             }
@@ -300,8 +355,8 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     });
     filter_channel->recv_thread = std::thread([this](){
         while(filter_channel->is_recv_running.load()){
-            if(!is_cv_running.load()){
-                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            if(is_local.load()){
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                 continue;
             }
             filter_channel->target_socket->recvPacket();
@@ -319,8 +374,6 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
             filter_dropdown->setEnabled(true);
     });
     connect(filter_dropdown, &QComboBox::currentIndexChanged, this, [this](int index){
-        qDebug() << "filter dropdown: " << index << " other: " << camera_dropdown->currentIndex();
-        is_cv_running.store(index > 0);
         filters.none.store(index == 0);
         filters.is_qr_active.store(index == 1);
         filters.is_hazmat_active.store(index == 2);
@@ -328,8 +381,8 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
         filters.is_circles1_active.store(index == 4);
         filters.is_circles2_active.store(index == 5);
     });
-    cameraView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    cameraView->setPixmap(QPixmap("../../assets/404.png").scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
+    camera_view->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    camera_view->setPixmap(QPixmap("../../assets/404.png").scaled((this->fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
     /*
     cv_thread = std::thread([this](){
         while(is_cv_running.load()){
@@ -374,11 +427,11 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
                     frame = latest_frame;
                 }
                 if(filters.is_shape1_active.load())
-                    result = this->detectShapeHough(frame);
+                    result = filters.detectShapeHough(frame);
                 else if(filters.is_shape2_active.load())
-                    result = this->detectShapeContours(frame);
+                    result = filters.detectShapeContours(frame);
                 else if(filters.is_shape3_active.load())
-                    result = this->detectShapeHybrid(frame);
+                    result = filters.detectShapeHybrid(frame);
                 std::lock_guard<std::mutex> lock(filter_mutex);
                 filter_frame = result;
             }
@@ -407,10 +460,416 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     */
     connect(this, &SubsectionWidget::frameReady, this, [this](QImage image){
         if(!image.isNull())
-            cameraView->setPixmap(QPixmap::fromImage(qt_frame).scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
+            camera_view->setPixmap(QPixmap::fromImage(qt_frame).scaled((this->fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
         else
             qCritical() << "SUBSECTION " << this->id << " FRAME READY | Invalid image: frame is null";
     });
+}
+
+cv::Mat SubsectionWidget::Filters::detectQR(cv::Mat frame){
+    std::vector<cv::Point> points;
+    cv::QRCodeDetector qr_decoder;
+    std::string text = qr_decoder.detectAndDecode(frame, points);
+    if(!text.empty()){
+        std::vector<std::vector<cv::Point>> contour = { points };
+        cv::polylines(frame, contour, true, cv::Scalar(0, 0, 255), 5);
+        cv::putText(frame, text, points[0]+cv::Point(5, -5), cv::FONT_HERSHEY_SIMPLEX, 1.5, cv::Scalar(0, 0, 255), 3);
+    }
+    else
+        frame = this->placeText("NO QR CODE DETECTED", frame);
+    return frame;
+}
+
+cv::Mat SubsectionWidget::Filters::detectCircles1(cv::Mat frame){
+    double scale = 4;
+    int rad_checks = 20;
+
+    cv::Mat gray_frame, temp;
+    cv::cvtColor(frame, gray_frame, cv::COLOR_BGR2GRAY);
+    cv::resize(gray_frame, temp, cv::Size(), 1.0/scale, 1.0/scale, cv::INTER_AREA);
+
+    std::vector<cv::Vec3f> ext_circles;
+    HoughCircles(temp, ext_circles, cv::HOUGH_GRADIENT, 1, temp.rows/8, 100, 50, temp.rows/8, temp.rows/4);
+
+    double min_dis = DBL_MAX;
+    cv::Vec3f ext_sector;
+
+    if (!ext_circles.empty()) {
+        for (size_t i = 0; i < ext_circles.size(); i++) {
+            ext_circles[i][0] *= scale;
+            ext_circles[i][1] *= scale;
+            ext_circles[i][2] *= scale;
+
+            cv::Point center(cvRound(ext_circles[i][0]), cvRound(ext_circles[i][1]));
+            int radius = cvRound(ext_circles[i][2]);
+            float dis = pow(frame.cols - center.x, 2) + pow(frame.rows - center.y, 2);
+
+            if (dis < min_dis) {
+                min_dis = dis;
+                ext_sector = ext_circles[i];
+            }
+        }
+    }
+
+    if (min_dis == DBL_MAX) {
+        return this->placeText("MISSING TASK SECTOR", frame);
+    }
+
+    cv::Mat ext_mask = cv::Mat::zeros(frame.size(), CV_8UC1), frame_roi;
+    circle(ext_mask, cv::Point(cvRound(ext_sector[0]), cvRound(ext_sector[1])), cvRound(ext_sector[2]), cv::Scalar(255), -1);
+    bitwise_and(gray_frame, gray_frame, frame_roi, ext_mask);
+    cv::Rect roi1 = cv::boundingRect(ext_mask);
+    frame_roi = frame_roi(roi1);
+
+    if (frame_roi.empty() || frame_roi.rows < 8 || frame_roi.cols < 8) {
+        return this->placeText("MISSING TASK SECTOR", frame);
+    }
+
+    std::vector<cv::Vec3f> inn_circles;
+    cv::HoughCircles(frame_roi, inn_circles, cv::HOUGH_GRADIENT, 1, frame_roi.rows/8, 100, 50, frame_roi.rows/8, frame_roi.rows/3);
+
+    if (inn_circles.empty()) {
+        return this->placeText("MISSING TASK SECTOR", frame);
+    }
+
+    cv::Mat mask_roi = cv::Mat::zeros(frame_roi.size(), CV_8UC1), final_roi, thresh, kernel = cv::Mat::ones(3, 3, CV_8UC1);
+    cv::circle(mask_roi, cv::Point(cvRound(inn_circles[0][0]), cvRound(inn_circles[0][1])), cvRound(inn_circles[0][2]) - 10, cv::Scalar(255), -1);
+    cv::bitwise_and(frame_roi, frame_roi, final_roi, mask_roi);
+    cv::Rect roi2 = cv::boundingRect(mask_roi);
+    final_roi = final_roi(roi2);
+    cv::resize(final_roi, final_roi, cv::Size(), scale, scale, cv::INTER_LINEAR);
+    cv::threshold(final_roi, thresh, 120, 255, cv::THRESH_BINARY);
+    cv::morphologyEx(thresh, thresh, cv::MORPH_OPEN, kernel, cv::Point(-1, -1), 2);
+
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(thresh, contours, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE);
+
+    std::vector<std::vector<cv::Point>> filtered_contours;
+    for (const auto& cnt : contours) {
+        if (contourArea(cnt) > 100) {
+            filtered_contours.push_back(cnt);
+        }
+    }
+
+    std::sort(filtered_contours.begin(), filtered_contours.end(), [](const std::vector<cv::Point>& a, const std::vector<cv::Point>& b){
+        return cv::contourArea(a) > cv::contourArea(b);
+    });
+
+    //cv::Mat mini;
+    //cv::cvtColor(thresh, mini, cv::COLOR_GRAY2BGR);
+    //cv::drawContours(mini, filtered_contours, -1, cv::Scalar(255, 0, 255), 2, cv::LINE_8);
+
+    std::vector<cv::Scalar> colors = { cv::Scalar(0,255,0), cv::Scalar(255,0,0), cv::Scalar(0,0,255), cv::Scalar(255,0,255), cv::Scalar(255,255,0) };
+
+    for (int i = 0; i < min(filtered_contours.size(), 3); i++) {
+        cv::Rect bound = cv::boundingRect(filtered_contours[i]);
+        float aspect_ratio = static_cast<float>(bound.width) / bound.height;
+
+        if (aspect_ratio > 0.95f && aspect_ratio < 1.05f) {
+            cv::Point2f center;
+            float radius;
+            cv::minEnclosingCircle(filtered_contours[i], center, radius);
+
+            std::vector<float> angles;
+            int max_empty = 0;
+            float best_angle = 0;
+
+            for (int ang = 0; ang < 360; ++ang) {
+                float angle = ang * CV_PI / 180.0f;
+                int empty_count = 0;
+
+                for (int j = 0; j < rad_checks; ++j) {
+                    float r = (radius * 1.1f) * j / rad_checks;
+                    int x = static_cast<int>(center.x + r * cos(angle));
+                    int y = static_cast<int>(center.y + r * sin(angle));
+
+                    if (x >= 0 && x < final_roi.cols && y >= 0 && y < final_roi.rows) {
+                        if (cv::pointPolygonTest(filtered_contours[i], cv::Point2f(x, y), false) == -1) {
+                            empty_count++;
+                        }
+                    }
+                }
+
+                if (empty_count >= max_empty) {
+                    max_empty = empty_count;
+                    best_angle = angle;
+                }
+
+                if (empty_count == rad_checks) {
+                    angles.push_back(angle);
+                }
+            }
+
+            if (!angles.empty()) {
+                float sum = std::accumulate(angles.begin(), angles.end(), 0.0f);
+                best_angle = sum / angles.size();
+            }
+
+            int gap_x = static_cast<int>(center.x + radius * cos(best_angle));
+            int gap_y = static_cast<int>(center.y + radius * sin(best_angle));
+
+            cv::line(frame, cv::Point(static_cast<int>(center.x/scale) + roi1.x + roi2.x, static_cast<int>(center.y/scale) + roi1.y + roi2.y), cv::Point(static_cast<int>(gap_x/scale) + roi1.x + roi2.x, static_cast<int>(gap_y/scale) + roi1.y + roi2.y), colors[i], 8);
+            //cv::line(mini, center, cv::Point(gap_x, gap_y), colors[i], 2);
+        }
+    }
+
+    //cv::imshow("yikes", mini);
+    return frame;
+}
+
+cv::Mat SubsectionWidget::Filters::detectCircles2(cv::Mat frame){
+    double scale = 4;
+    int rad_checks = 72;
+
+    cv::Mat gray_frame;
+    cv::cvtColor(frame, gray_frame, cv::COLOR_BGR2GRAY);
+
+    cv::Mat temp;
+    cv::resize(gray_frame, temp, cv::Size(), 1.0/scale, 1.0/scale, cv::INTER_AREA);
+
+    std::vector<cv::Vec3f> ext_circles;
+    cv::HoughCircles(temp, ext_circles, cv::HOUGH_GRADIENT, 1, temp.rows/8, 100, 50, temp.rows/8, temp.rows/4);
+
+    double min_dis = std::numeric_limits<double>::infinity();
+    cv::Vec3f ext_sector;
+
+    if (!ext_circles.empty()) {
+        for (std::size_t i = 0; i < ext_circles.size(); ++i) {
+            ext_circles[i][0] *= scale;
+            ext_circles[i][1] *= scale;
+            ext_circles[i][2] *= scale;
+            cv::Point center(std::round(ext_circles[i][0]), std::round(ext_circles[i][1]));
+            int radius = std::round(ext_circles[i][2]);
+            double dis = std::pow(frame.cols - center.x, 2) + std::pow(frame.rows - center.y, 2);
+
+            if(dis < min_dis){
+                min_dis = dis;
+                ext_sector = ext_circles[i];
+            }
+        }
+    }
+
+    if (min_dis == std::numeric_limits<double>::infinity())
+        return this->placeText("MISSING TASK SECTOR", frame);
+
+    cv::Mat ext_mask = cv::Mat::zeros(frame.size(), CV_8UC1);
+    cv::circle(ext_mask, cv::Point(std::round(ext_sector[0]), std::round(ext_sector[1])), std::round(ext_sector[2]), 255, -1);
+
+    cv::Mat frame_roi = cv::Mat::zeros(gray_frame.size(), gray_frame.type());
+    cv::bitwise_and(gray_frame, gray_frame, frame_roi, ext_mask);
+
+    cv::Rect roi_rect = cv::boundingRect(ext_mask);
+    frame_roi = frame_roi(roi_rect);
+
+    if (frame_roi.empty() || frame_roi.rows < 8 || frame_roi.cols < 8) {
+        return this->placeText("MISSING TASK SECTOR", frame);
+    }
+
+    std::vector<cv::Vec3f> inn_circles;
+    cv::HoughCircles(frame_roi, inn_circles, cv::HOUGH_GRADIENT, 1, frame_roi.rows / 8, 100, 50, frame_roi.rows / 8, frame_roi.rows / 3);
+
+    cv::Mat roi_mask = cv::Mat::ones(frame_roi.size(), CV_8UC1) * 255;
+
+    if (!inn_circles.empty()) {
+        for (std::size_t i = 0; i < inn_circles.size(); ++i) {
+            cv::Point center(std::round(inn_circles[i][0]), std::round(inn_circles[i][1]));
+            int radius = std::round(inn_circles[i][2]) + 5;
+            cv::circle(roi_mask, center, radius, 0, 8);
+        }
+    }
+    else
+        return this->placeText("MISSING INNER CIRCLE", frame);
+
+
+    cv::Mat mask_roi = cv::Mat::zeros(frame_roi.size(), CV_8UC1);
+    cv::circle(mask_roi, cv::Point(std::round(inn_circles[0][0]), std::round(inn_circles[0][1])), std::round(inn_circles[0][2]) - 10, 255, -1);
+
+    cv::Mat final;
+    cv::bitwise_and(frame_roi, frame_roi, final, mask_roi);
+
+    cv::Rect final_rect = cv::boundingRect(mask_roi);
+    final = final(final_rect);
+    cv::resize(final, final, cv::Size(), scale, scale, cv::INTER_LINEAR);
+
+    cv::Mat thresh;
+    cv::threshold(final, thresh, 120, 255, cv::THRESH_BINARY);
+
+    cv::Mat kernel = cv::Mat::ones(3, 3, CV_8UC1);
+    cv::morphologyEx(thresh, thresh, cv::MORPH_OPEN, kernel, cv::Point(-1, -1), 2);
+
+    std::vector<std::vector<cv::Point>> contours;
+    std::vector<cv::Vec4i> hierarchy;
+    cv::findContours(thresh, contours, hierarchy, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE);
+
+    std::vector<std::vector<cv::Point>> filtered_contours;
+    for (const auto& cnt : contours) {
+        if (cv::contourArea(cnt) > 100)
+            filtered_contours.push_back(cnt);
+    }
+
+    std::sort(filtered_contours.begin(), filtered_contours.end(), [](const std::vector<cv::Point>& a, const std::vector<cv::Point>& b) {
+        return cv::contourArea(a) > cv::contourArea(b);
+    });
+    std::vector<cv::Scalar> colors = { cv::Scalar(0,255,0), cv::Scalar(255,0,0), cv::Scalar(0,0,255), cv::Scalar(255,255,255), cv::Scalar(255,255,255) };
+
+    for (std::size_t i = 0; i < filtered_contours.size() && i < 3; ++i) {
+        cv::Rect bbox = cv::boundingRect(filtered_contours[i]);
+        float aspect_ratio = static_cast<float>(bbox.width) / bbox.height;
+
+        if (0.95f < aspect_ratio && aspect_ratio < 1.05f) {
+            cv::Point2f center;
+            float r;
+            cv::minEnclosingCircle(filtered_contours[i], center, r);
+
+            int min_touch = INT_MAX;
+            double best_angle = 0.0;
+            std::vector<double> angles;
+
+            for (int j = 0; j < rad_checks; ++j) {
+                double angle = 2.0 * CV_PI * j / rad_checks;
+
+                cv::Mat mask = cv::Mat::zeros(final.size(), CV_8UC1);
+                cv::drawContours(mask, std::vector<std::vector<cv::Point>>{filtered_contours[i]}, -1, 255, -1);
+
+                cv::Mat line_mask = cv::Mat::zeros(mask.size(), CV_8UC1);
+                int x3 = static_cast<int>(center.x + r * std::cos(angle));
+                int y3 = static_cast<int>(center.y + r * std::sin(angle));
+                cv::line(line_mask, cv::Point(static_cast<int>(center.x), static_cast<int>(center.y)), cv::Point(x3, y3), 255, 1);
+
+                cv::Mat overlap;
+                cv::bitwise_and(mask, line_mask, overlap);
+                int temp = cv::countNonZero(overlap);
+
+                if (temp < min_touch) {
+                    min_touch = temp;
+                    best_angle = angle;
+                }
+                if (temp == 0) {
+                    angles.push_back(angle);
+                }
+            }
+
+            if (!angles.empty()) {
+                double sum = std::accumulate(angles.begin(), angles.end(), 0.0);
+                best_angle = sum / angles.size();
+            }
+
+            int gap_x = static_cast<int>(center.x + r * std::cos(best_angle));
+            int gap_y = static_cast<int>(center.y + r * std::sin(best_angle));
+
+            cv::line(frame, cv::Point(static_cast<int>((center.x/scale)+roi_rect.x+final_rect.x), static_cast<int>(center.y/scale + roi_rect.y + final_rect.y)), cv::Point(static_cast<int>((gap_x/scale)+roi_rect.x+final_rect.x), static_cast<int>(gap_y/scale + roi_rect.y + final_rect.y)), colors[i], 8);
+        }
+    }
+
+    return frame;
+}
+
+
+cv::Mat SubsectionWidget::Filters::detectShape(cv::Mat frame){
+    float scale = 4.0;
+
+    cv::Mat gray_frame;
+    cv::cvtColor(frame, gray_frame, cv::COLOR_BGR2GRAY);
+    cv::Mat temp_resized;
+    cv::resize(gray_frame, temp_resized, cv::Size(), 1.0/scale, 1.0/scale, cv::INTER_AREA);
+    std::vector<cv::Vec3f> ext_circles_vec;
+    cv::HoughCircles(temp_resized, ext_circles_vec, cv::HOUGH_GRADIENT, 1, temp_resized.rows/8.0, 100, 50, temp_resized.rows/8, temp_resized.rows/4);
+
+    double min_dis = DBL_MAX;
+    cv::Vec3f ext_sector;
+
+    if (!ext_circles_vec.empty()) {
+        for (const auto& circle : ext_circles_vec) {
+            float x = circle[0] * scale;
+            float y = circle[1] * scale;
+            float r = circle[2] * scale;
+            cv::Point center = cv::Point(cvRound(x), cvRound(y));
+            double dis = (center.x*center.x) + (frame.rows-center.y)*(frame.rows-center.y);
+            if(dis < min_dis){
+                min_dis = dis;
+                ext_sector = cv::Vec3f(x, y, r);
+            }
+        }
+    }
+
+    if(min_dis == DBL_MAX)
+        return this->placeText("MISSING TASK SECTOR", frame);;
+
+    cv::Mat ext_mask = cv::Mat::zeros(frame.size(), CV_8UC1), masked_gray;
+    cv::circle(ext_mask, cv::Point(cvRound(ext_sector[0]), cvRound(ext_sector[1])), cvRound(ext_sector[2]), cv::Scalar(255), -1);
+    cv::bitwise_and(gray_frame, gray_frame, masked_gray, ext_mask);
+    cv::Rect ext_box = cv::boundingRect(ext_mask);
+    cv::Mat frame_roi = masked_gray(ext_box);
+    if(frame_roi.empty() || frame_roi.rows < 8 || frame_roi.cols < 8)
+        return this->placeText("MISSING TASK SECTOR", frame);
+
+    std::vector<cv::Vec3f> inner_circles_vec;
+    cv::HoughCircles(frame_roi, inner_circles_vec, cv::HOUGH_GRADIENT, 1, frame_roi.rows/8.0, 100, 50, frame_roi.rows/8, frame_roi.rows/3);
+    if(inner_circles_vec.empty())
+        return this->placeText("MISSING INNER ROI", frame);
+    cv::Vec3f inner_circle = inner_circles_vec[0];
+
+    cv::Mat mask_roi = cv::Mat::zeros(frame_roi.size(), CV_8UC1), final_roi, final_thresh;
+    cv::circle(mask_roi, cv::Point(cvRound(inner_circle[0]), cvRound(inner_circle[1])), cvRound(inner_circle[2]) - 10, cv::Scalar(255), -1);
+    cv::bitwise_and(frame_roi, frame_roi, final_roi, mask_roi);
+    cv::threshold(final_roi, final_thresh, 200, 255, cv::THRESH_BINARY);
+
+    std::vector<std::vector<cv::Point>> contours;
+    std::vector<cv::Vec4i> hierarchy;
+    cv::findContours(final_thresh, contours, hierarchy, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+    std::vector<std::vector<cv::Point>> filtered_contours;
+    for(const auto& contour : contours){
+        double area = cv::contourArea(contour);
+        if(area <= 10.0) continue;
+
+        cv::Rect bound_rect = cv::boundingRect(contour);
+        std::vector<cv::Point> hull;
+        cv::convexHull(contour, hull);
+        if(bound_rect.height == 0 || hull.empty()) continue;
+
+        double aspect_ratio = static_cast<double>(bound_rect.width) / bound_rect.height;
+        double solidity = area / cv::contourArea(hull);
+
+        if(aspect_ratio > 0.5 && aspect_ratio < 1.5 && solidity > 0.5)
+            filtered_contours.push_back(contour);
+    }
+
+    if(!filtered_contours.empty()){
+        cv::Point roi_center(final_roi.cols/2, final_roi.rows/2);
+        double min_distance = DBL_MAX;
+        std::vector<cv::Point> best_contour;
+
+        for(int i = 0; i < filtered_contours.size(); i++){
+            std::vector<cv::Point> contour = filtered_contours[i];
+            cv::Moments M = cv::moments(contour);
+
+            if(M.m00 != 0){
+                cv::Point center_of_mass(static_cast<int>(M.m10 / M.m00), static_cast<int>(M.m01 / M.m00));
+                double distance = cv::norm(center_of_mass - roi_center);
+
+                if(distance < min_distance){
+                    min_distance = distance;
+                    best_contour = contour;
+                }
+            }
+        }
+
+        if(!best_contour.empty()){
+            cv::Rect best_contour_box = cv::boundingRect(best_contour), final_box;
+
+            final_box.x = best_contour_box.x + ext_box.x - 10;
+            final_box.y = best_contour_box.y + ext_box.y - 10;
+            final_box.width = best_contour_box.width + 20;
+            final_box.height = best_contour_box.height + 20;
+
+            cv::rectangle(frame, final_box, cv::Scalar(0, 255, 0), 5);
+        }
+    }
+    else
+        return this->placeText("MISSING SHAPE CONTOUR", frame);
+
+    return frame;
 }
 
 SubsectionWidget::~SubsectionWidget(){
@@ -421,13 +880,15 @@ SubsectionWidget::~SubsectionWidget(){
     filter_channel->is_recv_running.store(false);
     filter_channel->is_send_running.store(false);
     emit destructorCalled(id);
-    if(cv_thread.joinable()) cv_thread.join();
+    cv_thread.join();
     if(this->id == 0){
         for(int i = 0; i < 10; i++){
             filter_channel->target_socket->sendPacket(std::vector<uchar>{0x00}, 0);
         }
     }
     filter_channel->target_socket->destroy();
+    filter_channel->recv_thread.join();
+    filter_channel->send_thread.join();
 }
 
 void SubsectionWidget::updateAvailableOptions(const QSet<QString> &usedOptions) {
@@ -451,19 +912,22 @@ void SubsectionWidget::setAvailableDevices(int num_cams) {
 void SubsectionWidget::onCameraSelected(int index) {
     cam_id = index - 1;
     if(index <= 0)
-        cameraView->setPixmap(QPixmap("../../assets/404.png").scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
+        camera_view->setPixmap(QPixmap("../../assets/404.png").scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
 }
 */
 
 void SubsectionWidget::updateFrame(cv::Mat frame, std::vector<uchar> compressed){
-    if(!compressed.empty()){
+    {
         std::lock_guard<std::mutex> lock(compressed_mutex);
         latest_compressed = compressed;
+    }
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex);
+        latest_frame = frame;
     }
     if(!filters.none.load()){
         std::lock_guard<std::mutex> lock(filter_mutex);
         if(!filter_frame.empty()){
-            qDebug() << "grabbed filter frame";
             frame = filter_frame;
         }
     }
@@ -502,11 +966,34 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     int id = 0;
     for(int i = 0; i < 2; i++) {
         for(int j = 0; j < 2; j++){
+            //if(i != 0 || j != 0) continue;
             cam_map.insert({subsections.size(), -1});
             SubsectionWidget* widget = new SubsectionWidget(id, this);
-            qDebug() << "pass";
             id++;
             connect(widget, &SubsectionWidget::subsectionClicked, this, [this](SubsectionWidget* clicked_widget){
+                if(fullscreen_widget){
+                    clicked_widget->hide();
+                    for(int k = 0; k < subsections.size(); k++){
+                        subsections[k]->setMinimumSize(QSize(480, 360));
+                        subsections[k]->setMaximumSize(QSize(480, 360));
+                        left_layout->addWidget(subsections[k], k/2, k%2);
+                        subsections[k]->setFullScreenMode(false);
+                        subsections[k]->show();
+                    }
+                    fullscreen_widget = nullptr;
+                }
+                else{
+                    fullscreen_widget = clicked_widget;
+                    for(SubsectionWidget* sw : subsections){
+                        sw->hide();
+                    }
+                    clicked_widget->setMaximumSize(QSize(960, 720));
+                    clicked_widget->setMinimumSize(QSize(960, 720));
+                    left_layout->addWidget(clicked_widget, 0, 0, 2, 2);
+                    clicked_widget->setFullScreenMode(true);
+                    clicked_widget->show();
+                }
+                /*
                 if(!is_fullscreen){
                     for(int k = 0; k < subsections.size(); k++){
                         if(subsections[k] == clicked_widget){
@@ -521,11 +1008,12 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
                 else{
                     for(int k = 0; k < subsections.size(); k++){
                         subsections[k]->setFullScreenMode(false);
-                        subsections[k]->show();
                         left_layout->addWidget(subsections[k], k/2, k%2);
+                        subsections[k]->show();
                     }
                     is_fullscreen = false;
                 }
+                */
             });
             connect(widget, &SubsectionWidget::selectionChanged, this, [this](){
                 QSet<QString> used_options;
@@ -551,8 +1039,6 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     }
     gas_label = new QLabel("No data");
     gas_label->setObjectName("sensor");
-    qr_label = new QLabel("No data");
-    qr_label->setObjectName("sensor");
     speech_label = new QLabel("No data");
     speech_label->setObjectName("sensor");
     magnetometer_label = new QLabel("No data");
@@ -563,21 +1049,27 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     microphone_button->setObjectName("mic");
     clear_button = new QPushButton("Clear data");
     clear_button->setObjectName("clear");
+    local_button = new QPushButton("Local filters");
+    local_button->setCheckable(true);
+    local_button->setObjectName("mic");
     dashboard_layout = new QGridLayout();
-    //dashboard_layout->setRowStretch(0, 1);
-    //dashboard_layout->setColumnStretch(0, 1);
-    std::vector<std::string> labels = {"Gas sensor: ", "QR Code: ", "Speech: ", "Magnetometer: "};
+    button_layout = new QHBoxLayout();
+    std::vector<QString> labels = {"Gas sensor: ", "Speech: ", "Magnetometer: "};
     for(int i = 0; i < labels.size(); i++){
-        sensor_label = new QLabel("Gas sensor: ");
+        sensor_label = new QLabel(labels[i]);
         sensor_label->setObjectName("sensor");
         dashboard_layout->addWidget(sensor_label, i, 0);
     }
     dashboard_layout->addWidget(gas_label, 0, 1);
-    dashboard_layout->addWidget(qr_label, 1, 1);
-    dashboard_layout->addWidget(speech_label, 2, 1);
-    dashboard_layout->addWidget(magnetometer_label, 3, 1);
-    dashboard_layout->addWidget(microphone_button, 4, 0);
-    dashboard_layout->addWidget(clear_button, 4, 1);
+    dashboard_layout->addWidget(speech_label, 1, 1);
+    dashboard_layout->addWidget(magnetometer_label, 2, 1);
+
+    button_layout->addWidget(microphone_button);
+    button_layout->addWidget(clear_button);
+    button_layout->addWidget(local_button);
+
+    //dashboard_layout->addWidget(microphone_button, 4, 0);
+    //dashboard_layout->addWidget(clear_button, 4, 1);
     setStyleSheet(R"(
         QLabel#sensor {
             color: white;
@@ -608,15 +1100,22 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     connect(microphone_button, &QPushButton::clicked, this, [this](){ emit buttonChanged(microphone_button->isChecked()); });
     connect(clear_button, &QPushButton::clicked, this, [this](){
         gas_label->setText("No data");
-        qr_label->setText("No data");
         speech_label->setText("No data");
         magnetometer_label->setText("No data");
     });
+    connect(local_button, &QPushButton::clicked, this, [this](){
+        for(int i = 0; i < subsections.size(); i++){
+            subsections[i]->setLocal(local_button->isChecked());
+        }
+    });
 
     // 3D MODEL VIEWER
-    //model = new ModelWidget(this);
-    //right_layout->addWidget(model);
+    model = new ModelWidget(this);
+    right_layout->addWidget(model);
     right_layout->addLayout(dashboard_layout);
+
+    right_layout->addLayout(button_layout);
+
     main_layout->addWidget(left_container, 3); // 3/4 width
     main_layout->addLayout(right_layout, 1);  // 1/4 width
 }
@@ -646,13 +1145,9 @@ template<typename T> void MainWindow::updateDashbord(int index, T data){
     }
     else if(index == 1){
         if constexpr(std::is_same_v<T, QString>)
-            qr_label->setText(QString("%1").arg(data));
+            speech_label->setText(QString("%1 %2").arg(speech_label->text()).arg(data));
     }
     else if(index == 2){
-        if constexpr(std::is_same_v<T, QString>)
-            speech_label->setText(QString("%1").arg(data));
-    }
-    else if(index == 3){
         if constexpr(std::is_same_v<T, QVector3D>)
             magnetometer_label->setText(QString("X: %1 Y: %2\nZ: %3").arg(data.x(), 0, 'f', 2).arg(data.y(), 0, 'f', 2).arg(data.z(), 0, 'f', 2));
     }
@@ -668,198 +1163,51 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     for(int i = 0; i < subsections.size(); i++){
         subsections[i]->destroy();
     }
+    model->destroy();
     event->accept();
     WSACleanup();
     qInfo() << "Bye";
 }
 
 void MainWindow::updateState(std::vector<float> data){
-    // WIP
-    /*
-    for(int i = 0; i < data.size(); i++){
-        qDebug() << "ros2 [" << i << "]: " << data[i];
-    }    
-    model->updateModel(data[0], data[1], data[2]);
-    model->updatePivot(0, 0, data[3]);
-    model->updatePivot(1, 0, data[4]);
-    model->updatePivot(2, 0, data[5]);
-    model->updatePivot(3, 0, data[6]);
-    model->updatePivot(4, 0, data[7]);
-    model->updatePivot(5, 0, data[8]);
-    for(int i = 0; i < 4; i++){
-        QColor color;
-        if(data[i+9] < 0)
-            color = QColor(nMap((int)data[i+9], -100, 0, 20, 250), 0, 0);
-        else if(data[i+9] > 0)
-            color = QColor(0, nMap((int)data[i+9], 0, 100, 20, 250), 0);
-        else
-            color = Qt::black;
-        model->updateColor(i, color);
+    //qDebug() << "updated state";
+
+    BasePacket model_state;
+    std::memcpy(&model_state, data.data(), sizeof(BasePacket));
+    this->updateDashbord(0, (int)model_state.gas_ppm);
+    this->updateDashbord(2, QVector3D(model_state.magnetometer_x, model_state.magnetometer_y, model_state.magnetometer_z));
+    if(model == nullptr){
+        qWarning() << "MAINWINDOW MODEL UPDATE | Invalid model: uninitialized pointer";
+        return;
     }
-    */
+    //qDebug() << "model angles: " << model_state.body_x << " " << model_state.body_y << " " << model_state.body_z;
+    //qDebug() << "model arm: " << model_state.arm_l << " " << model_state.arm_r;
+    //model->updateModel(model_state.body_x, model_state.body_y, model_state.body_z);
+    model->updateModel(0.0, 0.0, model_state.body_z);
+    model->updatePivot(1, 2, model_state.arm_l);
+    model->updatePivot(2, 2, 180.0-model_state.arm_r);
+    model->updatePivot(5, 1, model_state.art_1);
+    model->updatePivot(6, 1, model_state.art_2);
+    model->updatePivot(7, 1, model_state.art_3);
+    model->updatePivot(8, 1, model_state.art_4);
+
+    QColor color;
+    if(model_state.track_l < 0.0)
+        color = QColor(nMap(model_state.track_l, -1.0, 0.0, 20, 250), 0, 0);
+    else if(model_state.track_l > 0.0)
+        color = QColor(0, nMap(model_state.track_l, 0.0, 1.0, 20, 250), 0);
+    else
+        color = Qt::black;
+    model->updateColor(0, color);
+
+    if(model_state.track_r < 0)
+        color = QColor(nMap(model_state.track_r, -1.0, 0.0, 20, 250), 0, 0);
+    else if(model_state.track_r > 0)
+        color = QColor(0, nMap(model_state.track_r, 0.0, 1.0, 20, 250), 0);
+    else
+        color = Qt::black;
+    model->updateColor(1, color);
 }
-
-// --- DEPRECATED CLASS - USE RTPSTREAMHANDLER INSTEAD ---
-/*
-RTPServer::RTPServer(int port, PayloadType type, QObject *parent) : QObject(parent){
-    client_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if(client_socket == INVALID_SOCKET){
-        qDebug("[e] Could not create socket");
-        WSACleanup();
-    }
-    int recv_buff_size = 1024 * 1024;  // 1MB
-    setsockopt(client_socket, SOL_SOCKET, SO_RCVBUF, (char*)&recv_buff_size, sizeof(recv_buff_size));
-    socket_address.sin_family = AF_INET;
-    socket_address.sin_port = htons(port);
-    socket_address.sin_addr.s_addr = INADDR_ANY;
-    if(::bind(client_socket, (struct sockaddr*)&socket_address, socket_address_size) == SOCKET_ERROR){
-        qDebug() << "bind failed, error:" << WSAGetLastError();
-    }
-    is_running = true;
-    stream = new Stream;
-    stream->type = type;
-    stream->is_initialized = false;
-    if(type == PayloadType::AUDIO_PCM){
-        int error;
-        opus_decoder = opus_decoder_create(SAMPLE_RATE, 1, &error);
-    }
-    else listening_thread = std::thread(&RTPServer::startListening, this);
-}
-
-RTPServer::~RTPServer(){
-    is_running = false;
-    closesocket(client_socket);
-    if(listening_thread.joinable()) listening_thread.join();
-    if(stream->type == PayloadType::AUDIO_PCM) opus_decoder_destroy(opus_decoder);
-}
-
-void RTPServer::startListening(){
-    std::vector<char> packet(MAX_PACKET_SIZE);
-    int socket_address_size = sizeof(socket_address);
-    sockaddr_in senderAddr;
-    int senderAddrLen = sizeof(senderAddr);
-    qDebug() << "server awaiting data";
-    while(is_running){
-        //packet.resize(MAX_PACKET_SIZE);
-        //int bytes_received = recvfrom(client_socket, reinterpret_cast<char*>(packet.data()), MAX_PACKET_SIZE, 0, (struct sockaddr*)&socket_address, &socket_address_size);
-        int bytes_received = recvfrom(client_socket, packet.data(), packet.size(), 0, (struct sockaddr*)&socket_address, &socket_address_size);
-        if(bytes_received == SOCKET_ERROR){
-            qDebug() << "socket error: " << WSAGetLastError();
-            continue;
-        }
-        else if(bytes_received < sizeof(RTPHeader)) continue;
-        qDebug() << "bytes received: " << bytes_received;
-
-
-        header = new RTPHeader;
-        std::memcpy(header, packet.data(), sizeof(RTPHeader));
-        if(!stream->is_initialized) stream->is_initialized = true;
-        else if(header->seq_num != stream->seq_num + 1 && stream->seq_num != 65535){
-            qDebug() << "Packet loss detected! Expected: " << stream->seq_num + 1 << " Got: " << header->seq_num;
-        }
-        stream->seq_num = header->seq_num;
-
-
-        if(stream->type == PayloadType::ROS2_ARRAY && floatCallback){
-            //std::vector<float> data((bytes_received - sizeof(RTPHeader)) / sizeof(float));
-            //std::memcpy(data.data(), packet.data() + sizeof(RTPHeader), bytes_received - sizeof(RTPHeader));
-            std::vector<float> data((bytes_received - sizeof(RTPHeader)) / sizeof(float));
-            std::memcpy(data.data(), packet.data() + sizeof(RTPHeader), bytes_received - sizeof(RTPHeader));
-            floatCallback(data);
-        }
-        else if(stream->type == PayloadType::VIDEO_MJPEG && ucharCallback){
-            //std::vector<unsigned char> data(bytes_received - sizeof(RTPHeader));
-            //std::copy(packet.begin() + sizeof(RTPHeader), packet.begin() + bytes_received, data.begin());
-            //maybeno std::memcpy(data.data(), packet.data() + sizeof(RTPHeader), bytes_received - sizeof(RTPHeader));
-            std::vector<unsigned char> data(bytes_received - sizeof(RTPHeader));
-            std::copy(packet.begin() + sizeof(RTPHeader), packet.begin() + bytes_received, data.begin());
-            ucharCallback(data);
-        }
-
-
-        const int16_t* int16Ptr = reinterpret_cast<const int16_t*>(packet.data());
-        size_t int16Size = bytes_received / 2;
-        std::vector<int16_t> data(int16Ptr, int16Ptr + int16Size);
-
-
-        RTPHeader* header = reinterpret_cast<RTPHeader*>(packet.data());
-        char* payload = packet.data() + sizeof(RTPHeader);
-        size_t payload_size = bytes_received - sizeof(RTPHeader);
-        header->seq = ntohs(header->seq);
-        header->timestamp = ntohl(header->timestamp);
-        header->ssrc = ntohl(header->ssrc);
-
-
-        //RTPHeader* header = new RTPHeader;
-        //std::memcpy(header, packet.data(), sizeof(RTPHeader));
-
-        if(!stream->is_initialized) stream->is_initialized = true;
-        else if(header->seq != stream->last_seq + 1 && stream->last_seq != 65535){
-            qDebug() << "Packet loss detected! Expected: " << stream->last_seq + 1 << " Got: " << header->seq;
-        }
-        stream->last_seq = header->seq;
-
-        if(stream->type == PayloadType::ROS2_ARRAY && floatCallback){
-            std::vector<float> data((bytes_received - sizeof(RTPHeader)) / sizeof(float));
-            std::memcpy(data.data(), packet.data() + sizeof(RTPHeader), bytes_received - sizeof(RTPHeader));
-            floatCallback(data);
-        }
-        else if((stream->type == PayloadType::AUDIO_PCM || stream->type == PayloadType::VIDEO_MJPEG) && ucharCallback){
-            //std::vector<unsigned char> data(bytes_received - sizeof(RTPHeader));
-            //std::copy(packet.begin() + sizeof(RTPHeader), packet.begin() + bytes_received, data.begin());
-            //maybeno std::memcpy(data.data(), packet.data() + sizeof(RTPHeader), bytes_received - sizeof(RTPHeader));
-            std::vector<unsigned char> data(bytes_received);
-            std::copy(packet.begin(), packet.begin()+bytes_received, data.begin());
-            qDebug() << "about to callback, data size: " << data.size();
-            ucharCallback(data);
-        }
-
-        //if(data_callback) data_callback(payload);
-
-
-        if(static_cast<PayloadType>(header->pt) == PayloadType::AUDIO_PCM || static_cast<PayloadType>(header->pt) == PayloadType::ROS2_ARRAY){
-            if(data_callback) data_callback(header->ssrc, payload, payload_size);
-        }
-        else{
-            if(stream->current_frame.data.empty()) stream->current_frame.timestamp = header->timestamp;
-            stream->current_frame.data.insert(stream->current_frame.data.end(), payload, payload + payload_size);
-            if(header->m){
-                stream->current_frame.complete = true;
-                if(data_callback) data_callback(header->ssrc, stream->current_frame.data.data(), stream->current_frame.data.size());
-                stream->complete_frames.push(std::move(stream->current_frame));
-                stream->current_frame = Frame();
-                if(stream->complete_frames.size() > 30) stream->complete_frames.pop();
-            }
-        }
-
-        //packet.clear();
-    }
-}
-
-int RTPServer::audioCallback(const void* input, void* output, unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags, void* userData){
-    RTPServer* self = static_cast<RTPServer*>(userData);
-    return self->audioProcess(input, output, frameCount, timeInfo, statusFlags);
-}
-
-int RTPServer::audioProcess(const void* input, void* output, unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags){
-    if(!is_running) return paContinue;
-    unsigned char packet[4000];
-    int socket_address_size = sizeof(socket_address);
-    int bytes_received = recvfrom(client_socket, (char*)packet, sizeof(packet), 0, (struct sockaddr*)&socket_address, &socket_address_size);
-    if(bytes_received > sizeof(uint32_t)) {
-        opus_decode(opus_decoder, packet, bytes_received, (opus_int16*)output, AUDIO_BUFFER_SIZE, 0);
-    }
-    return paContinue;
-}
-
-void RTPServer::sendPacket(std::vector<int> data){
-    std::vector<char> packet(data.size() * sizeof(int));
-    std::memcpy(packet.data(), data.data(), data.size()*sizeof(int));
-    if(sendto(client_socket, packet.data(), packet.size(), 0, (struct sockaddr*)&socket_address, sizeof(socket_address)) == SOCKET_ERROR){
-        qWarning() << "Packet send failed" << WSAGetLastError();
-    }
-}
-*/
 
 // --- ROTAS stream handler ---
 RTPStreamHandler::RTPStreamHandler(int port, std::string address, PayloadType type, QObject *parent) : QObject(parent){
@@ -869,8 +1217,9 @@ RTPStreamHandler::RTPStreamHandler(int port, std::string address, PayloadType ty
     stream->timestamp = 0;
     stream->payload_type = type;
     stream->port = port;
+
     // --- UDP Socket init ---
-    // --- send ---
+    // -- send --
     send_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     send_socket_address.sin_family = AF_INET;
     send_socket_address.sin_port = htons(port + 1);
@@ -883,14 +1232,51 @@ RTPStreamHandler::RTPStreamHandler(int port, std::string address, PayloadType ty
     recv_socket_address.sin_port = htons(port);
     recv_socket_address.sin_addr.s_addr = INADDR_ANY;
     bind(recv_socket, (struct sockaddr*)&recv_socket_address, socket_address_size);
-    qInfo() << "Channel created, bound to ports (" << port << ", " << port + 1 << ")";
+    qInfo() << "Channel created bound to ports (" << port << ", " << port + 1 << ")";
 }
 
 RTPStreamHandler::~RTPStreamHandler(){
-    qInfo() << "Closing channel (" << stream->port << ", " << stream->port + 1 << ")";
     shutdown(recv_socket, SD_BOTH);
     closesocket(send_socket);
     closesocket(recv_socket);
+    qInfo() << "Closing channel (" << stream->port << ", " << stream->port + 1 << ")";
+}
+
+template <typename T> void RTPStreamHandler::sendPacket(std::vector<T> data, int marker){
+    // --- Initial settings ---
+    int max_size = MAX_UDP_PACKET_SIZE - sizeof(RTPHeader);
+    int num_fragments = ((data.size()*sizeof(T)) + max_size - 1) / max_size;
+    // -- (Pseudo)random ssrc --
+    thread_local uint16_t ssrc = 1;
+    ssrc ^= ssrc << 7;
+    ssrc ^= ssrc >> 9;
+    ssrc ^= ssrc << 8;
+
+    // --- Fragment setup ---
+    for(int i = 0; i < num_fragments; i++){
+        // -- RTP header info --
+        RTPHeader header;
+        header.version = 2;
+        header.p = 0;
+        header.x = 0;
+        header.cc = 0;
+        header.m = (uint16_t)num_fragments;
+        header.pt = 0;
+        header.timestamp = (uint16_t)marker;
+        header.ssrc = ssrc;
+        header.seq = (uint16_t)i;
+        if(num_fragments > 1)
+            header.seq |= FRAGMENTATION_FLAG;
+        // -- Merge header + packet --
+        int current_size = (max_size < ((data.size()*sizeof(T)) - (i*max_size)) ? max_size : (data.size()*sizeof(T)) - (i*max_size));
+        std::vector<char> packet(current_size + sizeof(RTPHeader));
+        std::memcpy(packet.data(), &header, sizeof(RTPHeader));
+        std::memcpy(packet.data() + sizeof(RTPHeader), data.data() + (i*max_size), current_size);
+
+        if(sendto(send_socket, (const char*)packet.data(), packet.size(), 0, (struct sockaddr*)&send_socket_address, socket_address_size) == SOCKET_ERROR){
+            qWarning() << "ROTAS SEND | Winsock error: " << WSAGetLastError();
+        }
+    }
 }
 
 void RTPStreamHandler::recvPacket(){
@@ -899,7 +1285,6 @@ void RTPStreamHandler::recvPacket(){
     int i = 0, num_fragments = -1, ssrc = -1;
     do{
         int bytes_received = recvfrom(recv_socket, buffer.data(), MAX_PACKET_SIZE, 0, (struct sockaddr*)&recv_socket_address, &socket_address_size);
-        //qDebug() << "bytes received: " << bytes_received;
         if(bytes_received == SOCKET_ERROR){
             int error = WSAGetLastError();
             if(error != 10004)
@@ -954,95 +1339,7 @@ void RTPStreamHandler::recvPacket(){
     }
     else
         qCritical() << "ROTAS RECV | Invalid packet data: mismatched payload/callback";
-
-    /*
-    std::vector<char> packet(MAX_PACKET_SIZE);
-    int bytes_received = recvfrom(recv_socket, packet.data(), packet.size(), 0, (struct sockaddr*)&recv_socket_address, &socket_address_size);
-    if(bytes_received == SOCKET_ERROR){
-        int error = WSAGetLastError();
-        if(error != 10004)
-            qCritical() << "Packet recv failed. Winsock error: " << error;
-        return;
-    }
-    RTPHeader* header = new RTPHeader;
-    std::memcpy(header, packet.data(), sizeof(RTPHeader));
-    if(bytes_received <= sizeof(RTPHeader)){
-        qWarning() << "Empty packet received. Size: " << bytes_received;
-        return;
-    }
-    if(stream->payload_type == PayloadType::ROS2_ARRAY && floatCallback){
-        std::vector<float> data((bytes_received - sizeof(RTPHeader)) / sizeof(float));
-        std::memcpy(data.data(), packet.data() + sizeof(RTPHeader), bytes_received - sizeof(RTPHeader));
-        floatCallback(data);
-    }
-    else if((stream->payload_type == PayloadType::VIDEO_MJPEG || stream->payload_type == PayloadType::AUDIO_PCM) && ucharCallback){
-        std::vector<unsigned char> data(bytes_received - sizeof(RTPHeader));
-        std::memcpy(data.data(), packet.data() + sizeof(RTPHeader), bytes_received - sizeof(RTPHeader));
-        ucharCallback(data);
-    }
-    else
-        qCritical() << "Payload / Callback error on packet recv";
-    */
 }
-
-/*
-template <typename T> void RTPStreamHandler::sendPacket(std::vector<T> data){
-
-    // --- RTP header info ---
-    RTPHeader header;
-    header.version = 2;
-    header.p = 0;
-    header.x = 0;
-    header.cc = 0;
-    header.m = 1;
-    header.pt = static_cast<uint8_t>(stream->payload_type);
-    header.seq = stream->seq_num++;
-    header.timestamp = stream->timestamp;
-    header.ssrc = stream->ssrc;
-    stream->timestamp += 100; // fix this please
-    // --- Prepare packet for send ---
-    std::vector<char> packet((data.size() * sizeof(int)) + sizeof(RTPHeader));
-    std::memcpy(packet.data(), &header, sizeof(RTPHeader));
-    std::memcpy(packet.data() + sizeof(RTPHeader), data.data(), data.size() * sizeof(int));
-    if(sendto(send_socket, packet.data(), packet.size(), 0, (struct sockaddr*)&send_socket_address, socket_address_size) == SOCKET_ERROR)
-        qWarning() << "Packet send failed. Winsock error: " << WSAGetLastError();
-
-        // --- Initial settings ---
-        int max_size = MAX_UDP_PACKET_SIZE - sizeof(RTPHeader);
-        int num_fragments = ((data.size()*sizeof(T)) + max_size - 1) / max_size;
-        // -- (Pseudo)random ssrc --
-        thread_local uint16_t ssrc = 1;
-        ssrc ^= ssrc << 7;
-        ssrc ^= ssrc >> 9;
-        ssrc ^= ssrc << 8;
-
-        // --- Fragment setup ---
-        for(int i = 0; i < num_fragments; i++){
-            // -- RTP header info --
-            RTPHeader header;
-            header.version = 2;
-            header.p = 0;
-            header.x = 0;
-            header.cc = 0;
-            header.m = (uint16_t)num_fragments;
-            header.pt = 0;
-            header.timestamp = 0;
-            header.ssrc = ssrc;
-            header.seq = (uint16_t)i;
-            if(num_fragments > 1)
-                header.seq |= FRAGMENTATION_FLAG;
-            // -- Merge header + packet --
-            int current_size = (max_size < ((data.size()*sizeof(T)) - (i*max_size)) ? max_size : (data.size()*sizeof(T)) - (i*max_size));
-            std::vector<char> packet(current_size + sizeof(RTPHeader));
-            std::memcpy(packet.data(), &header, sizeof(RTPHeader));
-            std::memcpy(packet.data() + sizeof(RTPHeader), data.data() + (i*max_size), current_size);
-
-            if(sendto(send_socket, (const char*)packet.data(), packet.size(), 0, (struct sockaddr*)&send_socket_address, socket_address_size) == SOCKET_ERROR){
-                qWarning() << "Packet send failed on fragment " << i << ". Winsock error: " << WSAGetLastError();
-            }
-        }
-}
-*/
 
 AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
     qInfo() << "Starting GUI...";
@@ -1056,22 +1353,42 @@ AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
     base_channel = new SocketStruct;
     base_channel->target_socket = new RTPStreamHandler(port, CLIENT_IP, PayloadType::ROS2_ARRAY);
     base_channel->target_socket->setFloatCallback([this](std::vector<float> data){
-        window->updateState(data);
-        base_channel->float_data = data;
+        if(data.size() < sizeof(BasePacket)/sizeof(float)){
+            qCritical() << "APPHANDLER BASE CB | Invalid payload: incomplete data";
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(base_channel->data_mutex);
+            base_channel->float_data = data;
+        }
+        window->updateState(std::vector<float>(data.begin()+1, data.end()));
     });
     base_channel->is_recv_running.store(true);
     base_channel->is_send_running.store(true);
 
     qInfo() << "Starting audio channel...";
+
+    vosk_channel = new SocketStruct;
+    vosk_channel->target_socket = new RTPStreamHandler(9008, "127.0.0.1", PayloadType::AUDIO_PCM);
+    vosk_channel->target_socket->setUCharCallback([this](std::vector<uchar> data){
+        std::string str(data.begin(), data.end());
+        window->updateDashbord(1, str);
+        qDebug() << "vosk recv: " << str;
+    });
+    vosk_channel->is_recv_running.store(true);
+    vosk_channel->is_send_running.store(true);
     audio_channel = new SocketStruct;
     audio_channel->target_socket = new RTPStreamHandler(port + 2, CLIENT_IP, PayloadType::AUDIO_PCM);
     audio_channel->target_socket->setUCharCallback([this](std::vector<uchar> data){
+        if(vosk_channel->is_send_running.load())
+            vosk_channel->target_socket->sendPacket(data, 1);
         std::vector<opus_int16> output(AUDIO_BUFFER_SIZE);
         int frames = opus_decode(opus_decoder, data.data(), data.size(), output.data(), output.size(), 0);
         Pa_WriteStream(stream, output.data(), frames);
     });
     audio_channel->is_recv_running.store(true);
     audio_channel->is_send_running.store(true);
+
     opus_decoder = opus_decoder_create(SAMPLE_RATE, 1, &pa_error);
     Pa_Initialize();
     Pa_OpenDefaultStream(&stream, 0, 1, paInt16, SAMPLE_RATE, AUDIO_BUFFER_SIZE, nullptr, nullptr);
@@ -1101,7 +1418,11 @@ AppHandler::~AppHandler(){
     if(base_channel->recv_thread.joinable())
         base_channel->recv_thread.join();
     qInfo() << "Base channel closed";
-
+    vosk_channel->is_recv_running.store(false);
+    vosk_channel->is_send_running.store(false);
+    vosk_channel->target_socket->destroy();
+    if(vosk_channel->recv_thread.joinable())
+        vosk_channel->recv_thread.join();
     audio_channel->is_recv_running.store(false);
     audio_channel->is_send_running.store(false);
     audio_channel->target_socket->destroy();
@@ -1143,8 +1464,14 @@ void AppHandler::init(){
         num_cams = (int)base_channel->float_data[0];
     }
     qInfo() << "Connection established. Received " << num_cams << " video sources";
-
     window->setCamPorts(num_cams);
+
+    base_channel->recv_thread = std::thread([this](){
+        while(base_channel->is_recv_running.load()){
+            base_channel->target_socket->recvPacket();
+        }
+    });
+
     for(int i = 0; i < num_cams; i++){
         SocketStruct* video_socket = new SocketStruct;
         video_socket->target_socket = new RTPStreamHandler(port + (2 * i) + 4, CLIENT_IP, PayloadType::VIDEO_MJPEG);
@@ -1179,6 +1506,14 @@ void AppHandler::init(){
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     });
+
+    vosk_channel->recv_thread = std::thread([this](){
+        while(vosk_channel->is_recv_running.load()){
+            vosk_channel->target_socket->recvPacket();
+        }
+    });
+    qDebug() << "vosk recv done";
+
     window->show();
     qInfo() << "Program init complete";
 }
