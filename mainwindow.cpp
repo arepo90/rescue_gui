@@ -132,7 +132,7 @@ void ModelWidget::loadModels(){
         QQuaternion::fromEulerAngles(0, -45, 0),
         QQuaternion::fromEulerAngles(0, 0, 45),
         QQuaternion::fromEulerAngles(0, 0, 45),
-        QQuaternion::fromEulerAngles(0, 0, 45),
+        QQuaternion::fromEulerAngles(0, 0, 0),
         QQuaternion::fromEulerAngles(0, 90, 0)
     };
     std::vector<QVector3D> pivot_translations = {
@@ -366,9 +366,9 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
         cam_id = index - 1;
         emit selectionChanged();
         if(index == 0){
-            this->updateFrame(cv::imread("../../assets/404.png"));
             filter_dropdown->setCurrentIndex(0);
             filter_dropdown->setEnabled(false);
+            this->updateFrame(cv::imread("../../assets/404.png"));
         }
         else
             filter_dropdown->setEnabled(true);
@@ -764,7 +764,6 @@ cv::Mat SubsectionWidget::Filters::detectCircles2(cv::Mat frame){
     return frame;
 }
 
-
 cv::Mat SubsectionWidget::Filters::detectShape(cv::Mat frame){
     float scale = 4.0;
 
@@ -892,6 +891,7 @@ SubsectionWidget::~SubsectionWidget(){
 }
 
 void SubsectionWidget::updateAvailableOptions(const QSet<QString> &usedOptions) {
+    return;
     auto * model = qobject_cast<QStandardItemModel*>(camera_dropdown->model());
     if(!model) return;
     for(int i = 0; i < camera_dropdown->count(); i++){
@@ -927,9 +927,8 @@ void SubsectionWidget::updateFrame(cv::Mat frame, std::vector<uchar> compressed)
     }
     if(!filters.none.load()){
         std::lock_guard<std::mutex> lock(filter_mutex);
-        if(!filter_frame.empty()){
+        if(!filter_frame.empty())
             frame = filter_frame;
-        }
     }
     if(!frame.empty() && frame.data != nullptr && frame.cols > 0 && frame.rows > 0) {
         if(frame.type() != CV_8UC3)
@@ -966,7 +965,6 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     int id = 0;
     for(int i = 0; i < 2; i++) {
         for(int j = 0; j < 2; j++){
-            //if(i != 0 || j != 0) continue;
             cam_map.insert({subsections.size(), -1});
             SubsectionWidget* widget = new SubsectionWidget(id, this);
             id++;
@@ -1130,12 +1128,19 @@ void MainWindow::updateFrame(int id, std::vector<unsigned char> data){
     cv::Mat frame = cv::imdecode(data, cv::IMREAD_COLOR);
     cv::cvtColor(frame, frame, cv::COLOR_BGR2RGB);
     int sub_id = -1;
+    std::vector<int> sub_ids = {};
     for(auto it = cam_map.begin(); it != cam_map.end(); it++){
-        if(it->second == id)
+        if(it->second == id){
             sub_id = it->first;
+            sub_ids.push_back(it->first);
+        }
     }
-    if(sub_id != -1)
-        subsections[sub_id]->updateFrame(frame, data);
+    if(sub_id != -1){
+        //subsections[sub_id]->updateFrame(frame, data);
+        for(int i = 0; i < sub_ids.size(); i++){
+            subsections[sub_ids[i]]->updateFrame(frame.clone(), data);
+        }
+    }
 }
 
 template<typename T> void MainWindow::updateDashbord(int index, T data){
@@ -1163,6 +1168,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     for(int i = 0; i < subsections.size(); i++){
         subsections[i]->destroy();
     }
+    qInfo() << "Filter channels closed";
     model->destroy();
     event->accept();
     WSACleanup();
@@ -1170,8 +1176,6 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 }
 
 void MainWindow::updateState(std::vector<float> data){
-    //qDebug() << "updated state";
-
     BasePacket model_state;
     std::memcpy(&model_state, data.data(), sizeof(BasePacket));
     this->updateDashbord(0, (int)model_state.gas_ppm);
@@ -1180,16 +1184,15 @@ void MainWindow::updateState(std::vector<float> data){
         qWarning() << "MAINWINDOW MODEL UPDATE | Invalid model: uninitialized pointer";
         return;
     }
-    //qDebug() << "model angles: " << model_state.body_x << " " << model_state.body_y << " " << model_state.body_z;
-    //qDebug() << "model arm: " << model_state.arm_l << " " << model_state.arm_r;
-    //model->updateModel(model_state.body_x, model_state.body_y, model_state.body_z);
-    model->updateModel(0.0, 0.0, model_state.body_z);
+
+    model->updateModel(model_state.body_x, model_state.body_y, model_state.body_z);
     model->updatePivot(1, 2, model_state.arm_l);
     model->updatePivot(2, 2, 180.0-model_state.arm_r);
     model->updatePivot(5, 1, model_state.art_1);
-    model->updatePivot(6, 1, model_state.art_2);
-    model->updatePivot(7, 1, model_state.art_3);
-    model->updatePivot(8, 1, model_state.art_4);
+    model->updatePivot(6, 2, model_state.art_2);
+    model->updatePivot(7, 2, model_state.art_3);
+    // not actually hand
+    //model->updatePivot(9, 2, model_state.art_4);
 
     QColor color;
     if(model_state.track_l < 0.0)
@@ -1434,7 +1437,7 @@ AppHandler::~AppHandler(){
     Pa_CloseStream(stream);
     Pa_Terminate();
     opus_decoder_destroy(opus_decoder);
-    qInfo() << "Audio channel closed";
+    qInfo() << "Audio channels closed";
 
     for(int i = 0; i < video_channels.size(); i++){
         video_channels[i]->is_recv_running.store(false);
