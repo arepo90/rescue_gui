@@ -54,10 +54,8 @@ ModelWidget::ModelWidget(QWidget *parent) : QWidget(parent){
     viewport->setRootEntity(root);
     viewport->defaultFrameGraph()->setClearColor(QColor("#202020"));
     container = QWidget::createWindowContainer(viewport, this);
-    //container->setMinimumSize(QSize(1280, 720));
     container->setMinimumSize(QSize(320, 360));
-    //container->setMaximumSize(QSize(320, 360));
-    this->loadModels();
+    loadModels();
     Qt3DRender::QCamera *camera = viewport->camera();
     camera->lens()->setPerspectiveProjection(45.0f, 16.0f/9.0f, 0.1f, 1000.0f);
     camera->setPosition(QVector3D(2.0f, 2.0f, 2.0f));
@@ -68,9 +66,6 @@ ModelWidget::ModelWidget(QWidget *parent) : QWidget(parent){
     cam_controller->setLookSpeed(180.0f);
     cam_controller->setCamera(camera);
     container->show();
-    QTimer* timer = new QTimer(this);
-    connect(timer, &QTimer::timeout, this, [this](){ container->update(); });
-    timer->start(1000);
 }
 
 ModelWidget::~ModelWidget(){
@@ -78,6 +73,39 @@ ModelWidget::~ModelWidget(){
         delete root;
         root = nullptr;
     }
+}
+
+void ModelWidget::updateState(BasePacket model_state){
+    if(root == nullptr){
+        qWarning() << "MAINWINDOW MODEL UPDATE | Invalid model: uninitialized pointer";
+        return;
+    }
+
+    updateModel(-model_state.body_y, model_state.body_z, -model_state.body_x);
+    updatePivot(1, 2, model_state.arm_l);
+    updatePivot(2, 2, 180.0-model_state.arm_r);
+    updatePivot(5, 1, model_state.art_1);
+    updatePivot(6, 2, model_state.art_2);
+    updatePivot(7, 2, model_state.art_3);
+    // not actually hand
+    //model->updatePivot(9, 2, model_state.art_4);
+
+    QColor color;
+    if(model_state.track_l < 0.0)
+        color = QColor(nMap(model_state.track_l, -1.0, 0.0, 20, 250), 0, 0);
+    else if(model_state.track_l > 0.0)
+        color = QColor(0, nMap(model_state.track_l, 0.0, 1.0, 20, 250), 0);
+    else
+        color = Qt::black;
+    updateColor(1, color);
+
+    if(model_state.track_r < 0)
+        color = QColor(nMap(model_state.track_r, -1.0, 0.0, 20, 250), 0, 0);
+    else if(model_state.track_r > 0)
+        color = QColor(0, nMap(model_state.track_r, 0.0, 1.0, 20, 250), 0);
+    else
+        color = Qt::black;
+    updateColor(0, color);
 }
 
 void ModelWidget::loadModels(){
@@ -190,12 +218,10 @@ void ModelWidget::loadModels(){
     }
 }
 
-// ONLY FOR BASE (ROOT) ENTITY
 void ModelWidget::updateModel(float angleX, float angleY, float angleZ){
     pivots[0]->setRotation(QQuaternion::fromEulerAngles(angleX, angleY, angleZ));
 }
 
-// ONLY FOR ARTICULATION (PIVOT) ENTITIES
 void ModelWidget::updatePivot(int index, int axis, float angle){
     if(index >= pivots.size()){
         qCritical() << "MODEL UPDATE PIVOT | Invalid pivot index: out of bounds";
@@ -219,16 +245,8 @@ void ModelWidget::updateColor(int index, QColor color){
     band_colors[index]->setDiffuse(color);
 }
 
-cv::Mat SubsectionWidget::Filters::placeText(std::string text, cv::Mat frame){
-    int temp = 0;
-    cv::Size text_size = cv::getTextSize(text,  cv::FONT_HERSHEY_SIMPLEX, 3.5, 3, &temp);
-    cv::putText(frame, text, cv::Point((frame.cols - text_size.width)/2, (frame.rows + text_size.height)/2),  cv::FONT_HERSHEY_SIMPLEX, 3.5, cv::Scalar(255, 0, 0), 3);
-    return frame;
-}
-
 // --- cam subsections ---
 SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
-    is_local.store(false);
     this->id = id;
     container = new QWidget(this);
     layout = new QVBoxLayout();
@@ -255,18 +273,8 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     filters.is_circles1_active.store(false);
     filters.is_circles2_active.store(false);
     filters.is_hazmat_active.store(false);
-    filter_channel = new SocketStruct;
-    filter_channel->target_socket = new RTPStreamHandler(9000 + id*2, "127.0.0.1", PayloadType::VIDEO_MJPEG);
-    filter_channel->is_recv_running.store(true);
-    filter_channel->is_send_running.store(true);
-    long long start = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now().time_since_epoch()).count();
-
     cv_thread = std::thread([this](){
         while(is_cv_running.load()){
-            if(!is_local.load()){
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                continue;
-            }
             if(filters.none.load()){
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 continue;
@@ -284,7 +292,7 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
             if(filters.is_qr_active.load())
                 frame = filters.detectQR(frame);
             else if(filters.is_hazmat_active.load())
-                frame = filters.placeText("HAZMAT NOT AVAILABLE LOCALLY", frame);
+                frame = filters.detectHazmat(frame);
             else if(filters.is_shape_active.load())
                 frame = filters.detectShape(frame);
             else if(filters.is_circles1_active.load())
@@ -300,66 +308,6 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
                 std::lock_guard<std::mutex> lock(filter_mutex);
                 filter_frame = frame;
             }
-        }
-    });
-    filter_channel->target_socket->setUCharCallback([this, id, start](std::vector<uchar> data){
-        if(data.empty()){
-            qCritical() << "SUBSECTION " << this->id << " PY CALLBACK | Invalid payload: data buffer empty";
-            return;
-        }
-        auto curr = std::chrono::high_resolution_clock::now();
-        cv::Mat frame = cv::imdecode(data, cv::IMREAD_COLOR);
-        cv::cvtColor(frame, frame, cv::COLOR_BGR2RGB);
-        std::lock_guard<std::mutex> lock(filter_mutex);
-        filter_frame = frame;
-    });
-    filter_channel->send_thread = std::thread([this](){
-        while(filter_channel->is_send_running.load()){
-            if(is_local.load()){
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                continue;
-            }
-            if(filters.none.load()){
-                std::this_thread::sleep_for(std::chrono::milliseconds(250));
-                continue;
-            }
-            std::vector<uchar> compressed_data;
-            {
-                std::lock_guard<std::mutex> lock(compressed_mutex);
-                compressed_data = latest_compressed;
-            }
-            if(compressed_data.empty()){
-                qDebug() << "empty compressed";
-                std::this_thread::sleep_for(std::chrono::milliseconds(250));
-                continue;
-            }
-            int marker = 0;
-            if(filters.is_qr_active.load())
-                marker = 1;
-            else if(filters.is_hazmat_active.load())
-                marker = 2;
-            else if(filters.is_shape_active.load())
-                marker = 3;
-            else if(filters.is_circles1_active.load())
-                marker = 4;
-            else if(filters.is_circles2_active.load())
-                marker = 5;
-            else{
-                qWarning() << "SUBSECTION " << this->id << " PY LOOP | Invalid marker: no active filter";
-                std::this_thread::sleep_for(std::chrono::milliseconds(250));
-                continue;
-            }
-            filter_channel->target_socket->sendPacket(compressed_data, marker);
-            //qDebug() << "sending " << compressed_data.size() << " bytes, marker: " << marker;
-        }
-    });
-    filter_channel->recv_thread = std::thread([this](){
-        while(filter_channel->is_recv_running.load()){
-            if(is_local.load()){
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                continue;
-            }
-            filter_channel->target_socket->recvPacket();
         }
     });
     connect(camera_dropdown,  &QComboBox::currentIndexChanged, this, [this](int index){
@@ -383,87 +331,67 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     });
     camera_view->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     camera_view->setPixmap(QPixmap("../../assets/404.png").scaled((this->fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
-    /*
-    cv_thread = std::thread([this](){
-        while(is_cv_running.load()){
-            if(filters.none.load()){
-                std::this_thread::sleep_for(std::chrono::milliseconds(250));
-                continue;
-            }
-            if(filters.is_qr_active.load()){
-                std::string decodedText;
-                std::vector<cv::Point> points;
-                cv::Mat frame;
-                {
-                    std::unique_lock<std::mutex> lock(frame_mutex);
-                    if(latest_frame.empty()){
-                        qDebug() << "qr empty latest";
-                        lock.unlock();
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                        continue;
-                    }
-                    frame = latest_frame;
-                }
-                decodedText = filters.qr_decoder.detectAndDecode(frame, points);
-                if(!decodedText.empty())
-                    qDebug() << "QR Code: " << decodedText;
-                else
-                    qDebug() << "qr empty";
-                std::lock_guard<std::mutex> lock(filter_mutex);
-                //filter_frame = frame;
-                filter_points.clear();
-                filter_points = points;
-            }
-            else if(filters.is_shape1_active.load() || filters.is_shape2_active.load() || filters.is_shape3_active.load()){
-                cv::Mat frame, result;
-                {
-                    std::unique_lock<std::mutex> lock(frame_mutex);
-                    if(latest_frame.empty()){
-                        qDebug() << "empty frame on filter";
-                        lock.unlock();
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                        continue;
-                    }
-                    frame = latest_frame;
-                }
-                if(filters.is_shape1_active.load())
-                    result = filters.detectShapeHough(frame);
-                else if(filters.is_shape2_active.load())
-                    result = filters.detectShapeContours(frame);
-                else if(filters.is_shape3_active.load())
-                    result = filters.detectShapeHybrid(frame);
-                std::lock_guard<std::mutex> lock(filter_mutex);
-                filter_frame = result;
-            }
-            else if(filters.is_circles_active.load()){
-                // implementation missing
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-            }
-            else if(filters.is_hazmat_active.load()){
-                cv::Mat frame;
-                {
-                    std::unique_lock<std::mutex> lock(frame_mutex);
-                    if(latest_frame.empty()){
-                        qDebug() << "empty frame on filter";
-                        lock.unlock();
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                        continue;
-                    }
-                    frame = latest_frame;
-                }
-
-                std::lock_guard<std::mutex> lock(filter_mutex);
-                filter_frame = frame;
-            }
-        }
-    });
-    */
     connect(this, &SubsectionWidget::frameReady, this, [this](QImage image){
         if(!image.isNull())
             camera_view->setPixmap(QPixmap::fromImage(qt_frame).scaled((this->fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
         else
             qCritical() << "SUBSECTION " << this->id << " FRAME READY | Invalid image: frame is null";
     });
+
+    std::ifstream file(LABELS_PATH);
+    if(!file.is_open()) {
+        qCritical() << "Error opening labels file";
+        return;
+    }
+    std::string line;
+    while(std::getline(file, line)){
+        if(!line.empty())
+            filters.labels.push_back(line);
+    }
+    file.close();
+    std::mt19937 rng(42);
+    std::uniform_int_distribution<int> dist(0, 255);
+    for(int i = 0; i < filters.labels.size(); i++) {
+        filters.colors.emplace_back(dist(rng), dist(rng), dist(rng));
+    }
+    filters.hazmat_model = cv::dnn::DetectionModel(CFG_PATH, WEIGHTS_PATH);
+    filters.hazmat_model.setInputScale(1.0 / 255.0);
+    filters.hazmat_model.setInputSize(INPUT_SIZE);
+    filters.hazmat_model.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
+    filters.hazmat_model.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
+}
+
+cv::Mat SubsectionWidget::Filters::detectHazmat(cv::Mat frame){
+    int H = frame.rows;
+    int W = frame.cols;
+    std::vector<int> classIds;
+    std::vector<float> confidences;
+    std::vector<cv::Rect> boxes;
+    hazmat_model.detect(frame, classIds, confidences, boxes, CONF_THRESH, NMS_THRESH);
+
+    for(int i = 0; i < classIds.size(); i++) {
+        int cid = classIds[i];
+        float conf = confidences[i];
+        cv::Rect box = boxes[i];
+        int cx = box.x + box.width / 2;
+        int cy = box.y + box.height / 2;
+        float ncx = static_cast<float>(cx) / W;
+        float ncy = static_cast<float>(cy) / H;
+
+        cv::Scalar color = colors[cid];
+        std::string label = labels[cid] + ": " + cv::format("%.2f", conf);
+        cv::rectangle(frame, box, color, 2);
+        cv::putText(frame, label, cv::Point(box.x, box.y - 15), cv::FONT_HERSHEY_SIMPLEX, 1.5, color, 3);
+    }
+    return frame;
+}
+
+// --- Visual filters ---
+cv::Mat SubsectionWidget::Filters::placeText(std::string text, cv::Mat frame){
+    int temp = 0;
+    cv::Size text_size = cv::getTextSize(text,  cv::FONT_HERSHEY_SIMPLEX, 3.5, 3, &temp);
+    cv::putText(frame, text, cv::Point((frame.cols - text_size.width)/2, (frame.rows + text_size.height)/2),  cv::FONT_HERSHEY_SIMPLEX, 3.5, cv::Scalar(255, 0, 0), 3);
+    return frame;
 }
 
 cv::Mat SubsectionWidget::Filters::detectQR(cv::Mat frame){
@@ -555,10 +483,6 @@ cv::Mat SubsectionWidget::Filters::detectCircles1(cv::Mat frame){
         return cv::contourArea(a) > cv::contourArea(b);
     });
 
-    //cv::Mat mini;
-    //cv::cvtColor(thresh, mini, cv::COLOR_GRAY2BGR);
-    //cv::drawContours(mini, filtered_contours, -1, cv::Scalar(255, 0, 255), 2, cv::LINE_8);
-
     std::vector<cv::Scalar> colors = { cv::Scalar(0,255,0), cv::Scalar(255,0,0), cv::Scalar(0,0,255), cv::Scalar(255,0,255), cv::Scalar(255,255,0) };
 
     for (int i = 0; i < min(filtered_contours.size(), 3); i++) {
@@ -619,7 +543,7 @@ cv::Mat SubsectionWidget::Filters::detectCircles1(cv::Mat frame){
 
 cv::Mat SubsectionWidget::Filters::detectCircles2(cv::Mat frame){
     double scale = 4;
-    int rad_checks = 72;
+    int rad_checks = 16;
 
     cv::Mat gray_frame;
     cv::cvtColor(frame, gray_frame, cv::COLOR_BGR2GRAY);
@@ -875,19 +799,8 @@ SubsectionWidget::~SubsectionWidget(){
     camera_dropdown->setCurrentIndex(0);
     filters.none.store(true);
     is_cv_running.store(false);
-    filter_channel->is_active.store(false);
-    filter_channel->is_recv_running.store(false);
-    filter_channel->is_send_running.store(false);
     emit destructorCalled(id);
     cv_thread.join();
-    if(this->id == 0){
-        for(int i = 0; i < 10; i++){
-            filter_channel->target_socket->sendPacket(std::vector<uchar>{0x00}, 0);
-        }
-    }
-    filter_channel->target_socket->destroy();
-    filter_channel->recv_thread.join();
-    filter_channel->send_thread.join();
 }
 
 void SubsectionWidget::updateAvailableOptions(const QSet<QString> &usedOptions) {
@@ -907,14 +820,6 @@ void SubsectionWidget::setAvailableDevices(int num_cams) {
         camera_dropdown->addItem(QString("Camera %1").arg(i), i);
     }
 }
-
-/*
-void SubsectionWidget::onCameraSelected(int index) {
-    cam_id = index - 1;
-    if(index <= 0)
-        camera_view->setPixmap(QPixmap("../../assets/404.png").scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
-}
-*/
 
 void SubsectionWidget::updateFrame(cv::Mat frame, std::vector<uchar> compressed){
     {
@@ -991,27 +896,6 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
                     clicked_widget->setFullScreenMode(true);
                     clicked_widget->show();
                 }
-                /*
-                if(!is_fullscreen){
-                    for(int k = 0; k < subsections.size(); k++){
-                        if(subsections[k] == clicked_widget){
-                            clicked_widget->setFullScreenMode(true);
-                            left_layout->addWidget(clicked_widget, 0, 0, 2, 2);
-                        }
-                        else
-                            subsections[k]->hide();
-                    }
-                    is_fullscreen = true;
-                }
-                else{
-                    for(int k = 0; k < subsections.size(); k++){
-                        subsections[k]->setFullScreenMode(false);
-                        left_layout->addWidget(subsections[k], k/2, k%2);
-                        subsections[k]->show();
-                    }
-                    is_fullscreen = false;
-                }
-                */
             });
             connect(widget, &SubsectionWidget::selectionChanged, this, [this](){
                 QSet<QString> used_options;
@@ -1039,6 +923,7 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     gas_label->setObjectName("sensor");
     speech_label = new QLabel("No data");
     speech_label->setObjectName("sensor");
+    speech_label->setWordWrap(true);
     magnetometer_label = new QLabel("No data");
     magnetometer_label->setObjectName("sensor");
     magnetometer_label->setAlignment({Qt::AlignHCenter, Qt::AlignVCenter});
@@ -1047,9 +932,6 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     microphone_button->setObjectName("mic");
     clear_button = new QPushButton("Clear data");
     clear_button->setObjectName("clear");
-    local_button = new QPushButton("Local filters");
-    local_button->setCheckable(true);
-    local_button->setObjectName("mic");
     dashboard_layout = new QGridLayout();
     button_layout = new QHBoxLayout();
     std::vector<QString> labels = {"Gas sensor: ", "Speech: ", "Magnetometer: "};
@@ -1064,7 +946,6 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
 
     button_layout->addWidget(microphone_button);
     button_layout->addWidget(clear_button);
-    button_layout->addWidget(local_button);
 
     //dashboard_layout->addWidget(microphone_button, 4, 0);
     //dashboard_layout->addWidget(clear_button, 4, 1);
@@ -1101,16 +982,13 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
         speech_label->setText("No data");
         magnetometer_label->setText("No data");
     });
-    connect(local_button, &QPushButton::clicked, this, [this](){
-        for(int i = 0; i < subsections.size(); i++){
-            subsections[i]->setLocal(local_button->isChecked());
-        }
-    });
 
     // 3D MODEL VIEWER
     model = new ModelWidget(this);
     right_layout->addWidget(model);
     right_layout->addLayout(dashboard_layout);
+
+    connect(this, &MainWindow::modelUpdated, model, &ModelWidget::updateState);
 
     right_layout->addLayout(button_layout);
 
@@ -1149,8 +1027,10 @@ template<typename T> void MainWindow::updateDashbord(int index, T data){
             gas_label->setText(QString("%1 ppm").arg(data));
     }
     else if(index == 1){
-        if constexpr(std::is_same_v<T, QString>)
-            speech_label->setText(QString("%1 %2").arg(speech_label->text()).arg(data));
+        if constexpr(std::is_same_v<T, QString>){
+            //speech_label->setText(QString("%1 %2").arg(speech_label->text()).arg(data));
+            speech_label->setText(data);
+        }
     }
     else if(index == 2){
         if constexpr(std::is_same_v<T, QVector3D>)
@@ -1178,38 +1058,9 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 void MainWindow::updateState(std::vector<float> data){
     BasePacket model_state;
     std::memcpy(&model_state, data.data(), sizeof(BasePacket));
-    this->updateDashbord(0, (int)model_state.gas_ppm);
-    this->updateDashbord(2, QVector3D(model_state.magnetometer_x, model_state.magnetometer_y, model_state.magnetometer_z));
-    if(model == nullptr){
-        qWarning() << "MAINWINDOW MODEL UPDATE | Invalid model: uninitialized pointer";
-        return;
-    }
-
-    model->updateModel(model_state.body_x, model_state.body_y, model_state.body_z);
-    model->updatePivot(1, 2, model_state.arm_l);
-    model->updatePivot(2, 2, 180.0-model_state.arm_r);
-    model->updatePivot(5, 1, model_state.art_1);
-    model->updatePivot(6, 2, model_state.art_2);
-    model->updatePivot(7, 2, model_state.art_3);
-    // not actually hand
-    //model->updatePivot(9, 2, model_state.art_4);
-
-    QColor color;
-    if(model_state.track_l < 0.0)
-        color = QColor(nMap(model_state.track_l, -1.0, 0.0, 20, 250), 0, 0);
-    else if(model_state.track_l > 0.0)
-        color = QColor(0, nMap(model_state.track_l, 0.0, 1.0, 20, 250), 0);
-    else
-        color = Qt::black;
-    model->updateColor(0, color);
-
-    if(model_state.track_r < 0)
-        color = QColor(nMap(model_state.track_r, -1.0, 0.0, 20, 250), 0, 0);
-    else if(model_state.track_r > 0)
-        color = QColor(0, nMap(model_state.track_r, 0.0, 1.0, 20, 250), 0);
-    else
-        color = Qt::black;
-    model->updateColor(1, color);
+    updateDashbord(0, (int)model_state.gas_ppm);
+    updateDashbord(2, QVector3D(model_state.magnetometer_x, model_state.magnetometer_y, model_state.magnetometer_z));
+    emit modelUpdated(model_state);
 }
 
 // --- ROTAS stream handler ---
@@ -1245,7 +1096,7 @@ RTPStreamHandler::~RTPStreamHandler(){
     qInfo() << "Closing channel (" << stream->port << ", " << stream->port + 1 << ")";
 }
 
-template <typename T> void RTPStreamHandler::sendPacket(std::vector<T> data, int marker){
+template <typename T> void RTPStreamHandler::sendPacket(std::vector<T> data, int marker, int delay){
     // --- Initial settings ---
     int max_size = MAX_UDP_PACKET_SIZE - sizeof(RTPHeader);
     int num_fragments = ((data.size()*sizeof(T)) + max_size - 1) / max_size;
@@ -1279,6 +1130,8 @@ template <typename T> void RTPStreamHandler::sendPacket(std::vector<T> data, int
         if(sendto(send_socket, (const char*)packet.data(), packet.size(), 0, (struct sockaddr*)&send_socket_address, socket_address_size) == SOCKET_ERROR){
             qWarning() << "ROTAS SEND | Winsock error: " << WSAGetLastError();
         }
+        if(delay != 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
     }
 }
 
@@ -1304,7 +1157,10 @@ void RTPStreamHandler::recvPacket(){
         packet.resize(bytes_received - sizeof(RTPHeader));
         std::memcpy(packet.data(), buffer.data() + sizeof(RTPHeader), bytes_received - sizeof(RTPHeader));
 
-        if((header->seq & FRAGMENTATION_FLAG) == 0) break;
+        if((header->seq & FRAGMENTATION_FLAG) == 0){
+            ssrc = header->ssrc;
+            break;
+        }
         else if(i == 0){
             num_fragments = header->m;
             ssrc = header->ssrc;
@@ -1344,6 +1200,7 @@ void RTPStreamHandler::recvPacket(){
         qCritical() << "ROTAS RECV | Invalid packet data: mismatched payload/callback";
 }
 
+// --- Universal ---
 AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
     qInfo() << "Starting GUI...";
     window = new MainWindow;
@@ -1372,19 +1229,20 @@ AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
     qInfo() << "Starting audio channel...";
 
     vosk_channel = new SocketStruct;
-    vosk_channel->target_socket = new RTPStreamHandler(9008, "127.0.0.1", PayloadType::AUDIO_PCM);
+    vosk_channel->target_socket = new RTPStreamHandler(9000, "127.0.0.1", PayloadType::AUDIO_PCM);
     vosk_channel->target_socket->setUCharCallback([this](std::vector<uchar> data){
         std::string str(data.begin(), data.end());
-        window->updateDashbord(1, str);
-        qDebug() << "vosk recv: " << str;
+        window->updateDashbord(1, QString::fromUtf8(str.c_str()));
     });
     vosk_channel->is_recv_running.store(true);
     vosk_channel->is_send_running.store(true);
     audio_channel = new SocketStruct;
     audio_channel->target_socket = new RTPStreamHandler(port + 2, CLIENT_IP, PayloadType::AUDIO_PCM);
     audio_channel->target_socket->setUCharCallback([this](std::vector<uchar> data){
-        if(vosk_channel->is_send_running.load())
-            vosk_channel->target_socket->sendPacket(data, 1);
+        if(vosk_channel->is_send_running.load()){
+            //vosk_channel->companion->write(data, 2);
+            vosk_channel->target_socket->sendPacket(data, 2);
+        }
         std::vector<opus_int16> output(AUDIO_BUFFER_SIZE);
         int frames = opus_decode(opus_decoder, data.data(), data.size(), output.data(), output.size(), 0);
         Pa_WriteStream(stream, output.data(), frames);
@@ -1412,6 +1270,7 @@ AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
 
 AppHandler::~AppHandler(){
     qInfo() << "Closing program...";
+
     base_channel->target_socket->sendPacket(std::vector<int>{0, -1});
     base_channel->is_recv_running.store(false);
     base_channel->is_send_running.store(false);
@@ -1421,11 +1280,14 @@ AppHandler::~AppHandler(){
     if(base_channel->recv_thread.joinable())
         base_channel->recv_thread.join();
     qInfo() << "Base channel closed";
+
     vosk_channel->is_recv_running.store(false);
     vosk_channel->is_send_running.store(false);
+    vosk_channel->target_socket->sendPacket(std::vector<int>{0}, -1);
     vosk_channel->target_socket->destroy();
     if(vosk_channel->recv_thread.joinable())
         vosk_channel->recv_thread.join();
+    qDebug() << "vosk thread joined";
     audio_channel->is_recv_running.store(false);
     audio_channel->is_send_running.store(false);
     audio_channel->target_socket->destroy();
@@ -1453,11 +1315,10 @@ AppHandler::~AppHandler(){
 
 void AppHandler::init(){
     qInfo() << "Starting ROTAS stream...";
-
     int num_cams = 0;
-    base_channel->target_socket->sendPacket(std::vector<int>{0, 0});
     qInfo() << "Awaiting response...";
     base_channel->target_socket->recvPacket();
+    base_channel->target_socket->sendPacket(std::vector<int>{0, 0});
     {
         std::lock_guard<std::mutex> lock(base_channel->data_mutex);
         if(base_channel->float_data.empty() || base_channel->float_data[0] < 0){
@@ -1509,18 +1370,16 @@ void AppHandler::init(){
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     });
-
     vosk_channel->recv_thread = std::thread([this](){
         while(vosk_channel->is_recv_running.load()){
             vosk_channel->target_socket->recvPacket();
         }
     });
-    qDebug() << "vosk recv done";
-
     window->show();
     qInfo() << "Program init complete";
 }
 
+// --- (Optional) console logs ---
 ConsoleWindow::ConsoleWindow(QWidget *parent) : QMainWindow(parent){
     text_edit = new QTextEdit(this);
     setWindowTitle("Debug console");

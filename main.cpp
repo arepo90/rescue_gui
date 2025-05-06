@@ -18,9 +18,6 @@
 #include "mainwindow.h"
 #include <QApplication>
 
-/*
-*/
-
 // WORK IN PROGRESS OK ?😭😭😭😭😭
 
 // --- tests n stuff ---
@@ -231,6 +228,7 @@ cv::Mat detectShapeGPU(const cv::Mat& input_frame) {
 */
 
 // might be the goat fr
+/*
 cv::Mat detectShape(cv::Mat input_frame){
     // here in case the main version breaks and i need to start over
     cv::Mat frame = input_frame, gray_frame, thresh_frame;
@@ -304,21 +302,7 @@ cv::Mat detectShape(cv::Mat input_frame){
     }
 
     std::vector<std::vector<cv::Point>> contours;
-    /*
-    cv::Mat masked;
-    cv::bitwise_and(morphed, mask, masked);
-    mask = cv::Mat::zeros(task_thresh.size(), CV_8UC1);
-    if(circles.size() == 0){
-        cv::imshow("circles", task_mat);
-        qDebug() << "no circles found";
-        return cv::Mat();
-    }
-    cv::circle(mask, cv::Point(cvRound(circles[0][0]), cvRound(circles[0][1])), cvRound(circles[0][2])-15, cv::Scalar(255), -1);
-    cv::Mat result;
-    task_thresh.copyTo(result, mask);
-    cv::imshow("please", result);
-    cv::findContours(masked, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    */
+
 
     cv::Mat mask_roi = cv::Mat::zeros(final.size(), CV_8UC1), roi, ahorasi;
     // FIX THIS SHIT BRUH;
@@ -389,6 +373,7 @@ cv::Mat detectShape(cv::Mat input_frame){
     }
     return frame;
 }
+*/
 
 /*
 cv::Mat detectShapeExp(cv::Mat frame){
@@ -440,6 +425,8 @@ cv::Mat detectShapeExp(cv::Mat frame){
 }
 */
 
+// DirectX thingamajig
+/*
 #include <dxgidebug.h>
 #pragma comment(lib, "dxguid.lib")
 
@@ -463,8 +450,20 @@ void reportLiveD3DObjects()
         FreeLibrary(dxgidebug);
     }
 }
+*/
 
 int main(int argc, char* argv[]){
+    // ????
+    /*
+    QSurfaceFormat format;
+    format.setVersion(3, 3);
+    format.setProfile(QSurfaceFormat::CoreProfile);
+    format.setDepthBufferSize(24);
+    format.setStencilBufferSize(8);
+    format.setSamples(4);
+    format.setSwapInterval(0);
+    QSurfaceFormat::setDefaultFormat(format);
+    */
     QApplication app(argc, argv);
 
     // console window for debugging while on release exec.
@@ -512,7 +511,6 @@ int main(int argc, char* argv[]){
     /*
     // Filter performance tests
     SubsectionWidget* widget = new SubsectionWidget(0);
-
     cv::Mat frame = cv::imread("../../assets/full_crate_test_tri.png");
     auto start = std::chrono::high_resolution_clock::now();
     cv::Mat frame2 = widget->detectShapeHough(frame);
@@ -521,16 +519,29 @@ int main(int argc, char* argv[]){
     qDebug() << std::chrono::duration_cast<std::chrono::milliseconds>(end-start).count() << " ms";
     */
 
-    // --- ACTUAL PROGRAM---
-    // 3d model viewer is commented out for debug version
-    // uncomment the relevant lines on MainWindow constructor on mainwindow.cpp
-
     WSAData wsa_data;
     WSAStartup(MAKEWORD(2, 2), &wsa_data);
     AppHandler* app_handler = new AppHandler(8000);
     app_handler->init();
 
-    int res = app.exec();
-    reportLiveD3DObjects();
-    return res;
+    /*
+    int tot = 0;
+    auto handler = new RTPStreamHandler(8000, "127.0.0.1", PayloadType::VIDEO_MJPEG);
+    handler->setUCharCallback([&tot](std::vector<uchar> data){
+        auto mid = std::chrono::high_resolution_clock::now();
+        qDebug() << "received " << data.size() << " bytes at " << mid.time_since_epoch().count();
+        tot += data.size();
+    });
+    auto start = std::chrono::high_resolution_clock::now();
+    for(int i = 0; i < 10; i++){
+        qDebug() << "awaiting " << i;
+        handler->recvPacket();
+        if(i == 0)
+            start = std::chrono::high_resolution_clock::now();
+    }
+    auto end = std::chrono::high_resolution_clock::now();
+    qDebug() << "total: " << tot << " bytes in " << std::chrono::duration_cast<std::chrono::milliseconds>(end-start).count();
+    */
+
+    return app.exec();
 }

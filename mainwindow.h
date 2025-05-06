@@ -1,6 +1,7 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+// --- qt ---
 #include <QApplication>
 #include <Qt3DWindow>
 #include <QForwardRenderer>
@@ -30,9 +31,12 @@
 #include <QTextEdit>
 #include <QDateTime>
 
+// --- c++ ---
+#include <string>
 #include <portaudio.h>
 #include <opencv2/opencv.hpp>
 #include <opencv2/objdetect.hpp>
+#include <opencv2/dnn.hpp>
 #include <opus/opus.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -44,15 +48,27 @@
 #include <Xinput.h>
 #include <windows.h>
 #include <iostream>
+#include <random>
+#include <fstream>
 #pragma comment(lib, "ws2_32.lib")
 
+// --- Comms settings ---
 #define AUDIO_BUFFER_SIZE 960       // 960 bytes
 #define SAMPLE_RATE 16000           // 16 kHz
 #define MAX_PACKET_SIZE 65536       // 65539 bytes
-#define CLIENT_IP "127.0.0.1"
+#define CLIENT_IP "127.0.0.1"       //"192.168.0.238"
 #define MAX_UDP_PACKET_SIZE 65507   // 65507 bytes
 #define FRAGMENTATION_FLAG 0x8000   // RTP Header flag
 
+// --- Hazmat settings ---
+#define CFG_PATH "../../net/yolo.cfg"
+#define WEIGHTS_PATH "../../net/yolo.weights"
+#define LABELS_PATH "../../net/labels.names"
+#define INPUT_SIZE cv::Size(416, 416)
+#define CONF_THRESH 0.8f
+#define NMS_THRESH 0.4f
+
+// --- Rotas prereqs ---
 enum PACKET_TYPE{ SETUP = 0, AUDIO = 1, VIDEO = 2 };
 
 struct RTPHeader {
@@ -91,9 +107,10 @@ enum class PayloadType : uint8_t{
     ROS2_ARRAY = 99
 };
 
-//std::map<int, std::string> payload_string = {{97, "VIDEO"}, {98, "AUDIO"}, {99, "GNRL DATA"}};
-
+// --- Helper func ---
 int nMap(float n, float minIn, float maxIn, float minOut, float maxOut);
+
+// --- Class declarations ---
 
 class ConsoleWindow : public QMainWindow{
     Q_OBJECT
@@ -123,6 +140,8 @@ public:
     void updateModel(float angleX, float angleY, float angleZ);
     void updateColor(int index, QColor color);
     void destroy(){ delete this; }
+public slots:
+    void updateState(BasePacket model_state);
 private:
     void loadModels();
     Qt3DCore::QEntity* root = nullptr;
@@ -145,7 +164,7 @@ public:
     void destroy(){ delete this; }
     static int audioCallback(const void* input, void* output, unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags, void* userData);
     int audioProcess(const void* input, void* output, unsigned long frameCount, const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags);
-    template <typename T> void sendPacket(std::vector<T> data, int marker = 0);
+    template <typename T> void sendPacket(std::vector<T> data, int marker = 0, int delay = 0);
     void recvPacket();
 private:
     struct Stream{
@@ -209,7 +228,6 @@ public:
     void updateAvailableOptions(const QSet<QString> &usedOptions);
     std::pair<int, QString> getCurrentSelection(){ return std::make_pair(cam_id, camera_dropdown->currentText()); }
     void updateFrame(cv::Mat frame, std::vector<uchar> compressed = {});
-    void setLocal(bool is_pressed){ this->is_local.store(is_pressed); }
 signals:
     void subsectionClicked(SubsectionWidget *widget);
     void selectionChanged();
@@ -230,6 +248,10 @@ private:
         cv::Mat detectShape(cv::Mat frame);
         cv::Mat detectCircles1(cv::Mat frame);
         cv::Mat detectCircles2(cv::Mat frame);
+        cv::Mat detectHazmat(cv::Mat frame);
+        std::vector<cv::Scalar> colors;
+        std::vector<std::string> labels;
+        cv::dnn::DetectionModel hazmat_model;
     };
     Filters filters;
     QComboBox *camera_dropdown;
@@ -243,7 +265,6 @@ private:
     QWidget* container;
     std::vector<int> availableDevices;
     bool fullScreen = false;
-    std::atomic<bool> is_local;
     std::atomic<bool> is_cv_running;
     std::mutex frame_mutex;
     std::mutex filter_mutex;
@@ -252,11 +273,8 @@ private:
     cv::Mat latest_frame;
     cv::Mat filter_frame;
     std::vector<uchar> latest_compressed;
-    std::vector<cv::Point> filter_points;
-    std::vector<float> thermal_data;
     std::thread cv_thread;
     QImage qt_frame;
-    SocketStruct* filter_channel;
 };
 
 class MainWindow : public QWidget{
@@ -271,8 +289,8 @@ signals:
     void windowClosing();
     void selectionChanged(std::map<int, int> cam_map);
     void buttonChanged(bool is_active);
-    void localChanged(bool is_active);
     void destructorCalled(int id);
+    void modelUpdated(BasePacket model_state);
 protected:
     void closeEvent(QCloseEvent *event) override;
 private:
@@ -288,7 +306,6 @@ private:
     QLabel* magnetometer_label;
     QPushButton* microphone_button;
     QPushButton* clear_button;
-    QPushButton* local_button;
     SubsectionWidget* fullscreen_widget = nullptr;
     std::vector<SubsectionWidget*> subsections;
     bool is_fullscreen;
@@ -308,6 +325,7 @@ private:
     PaError PaErrorCallback(const char *errorText, PaHostApiTypeId hostApiType, PaHostErrorInfo* hostErrorInfo){ return 0; }
     SocketStruct* base_channel;
     SocketStruct* audio_channel;
+    //CompanionStruct* vosk_channel;
     SocketStruct* vosk_channel;
     std::vector<SocketStruct*> video_channels;
     std::atomic<bool> is_audio_active;
