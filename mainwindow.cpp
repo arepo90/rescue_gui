@@ -51,7 +51,6 @@ std::vector<int> Controller::readState(){
 ModelWidget::ModelWidget(QWidget *parent) : QWidget(parent){
     root = new Qt3DCore::QEntity();
     viewport = new Qt3DExtras::Qt3DWindow();
-    viewport->setRootEntity(root);
     viewport->defaultFrameGraph()->setClearColor(QColor("#202020"));
     container = QWidget::createWindowContainer(viewport, this);
     container->setMinimumSize(QSize(320, 360));
@@ -59,13 +58,14 @@ ModelWidget::ModelWidget(QWidget *parent) : QWidget(parent){
     Qt3DRender::QCamera *camera = viewport->camera();
     camera->lens()->setPerspectiveProjection(45.0f, 16.0f/9.0f, 0.1f, 1000.0f);
     camera->setPosition(QVector3D(2.0f, 2.0f, 2.0f));
-    camera->setViewCenter(QVector3D(0, 0.0f, 0));
+    camera->setViewCenter(QVector3D(0.0f, 0.0f, 0.0f));
     camera->setUpVector(QVector3D(0.0f, 1.0f, 0.0f));
     Qt3DExtras::QOrbitCameraController *cam_controller = new Qt3DExtras::QOrbitCameraController(root);
     cam_controller->setLinearSpeed(10.0f);
     cam_controller->setLookSpeed(180.0f);
     cam_controller->setCamera(camera);
-    container->show();
+    viewport->setRootEntity(root);
+    //container->show();
 }
 
 ModelWidget::~ModelWidget(){
@@ -109,8 +109,8 @@ void ModelWidget::updateState(BasePacket model_state){
 }
 
 void ModelWidget::loadModels(){
-    Qt3DCore::QEntity *light_entity = new Qt3DCore::QEntity(root);
-    Qt3DRender::QDirectionalLight *directional_light = new Qt3DRender::QDirectionalLight(light_entity);
+    Qt3DCore::QEntity* light_entity = new Qt3DCore::QEntity(root);
+    Qt3DRender::QDirectionalLight* directional_light = new Qt3DRender::QDirectionalLight(light_entity);
     directional_light->setColor("white");
     directional_light->setIntensity(0.75);
     directional_light->setWorldDirection(QVector3D(-1.0, -1.0, -1.0));
@@ -175,18 +175,17 @@ void ModelWidget::loadModels(){
         QVector3D(0, 0.07, -0.01),
         QVector3D(0, 0.18, 0)
     };
-    Qt3DExtras::QPhongMaterial *mesh_material = new Qt3DExtras::QPhongMaterial();
+    Qt3DExtras::QPhongMaterial* mesh_material = new Qt3DExtras::QPhongMaterial();
     mesh_material->setDiffuse(QColor("#a6a6a6"));
-    // part init
     for(int i = 0; i < mesh_addresses.size(); i++){
         Qt3DCore::QEntity *pivot_entity = new Qt3DCore::QEntity((i == 0 ? root : (i <= 5 ? parts[0] : parts.back())));
         Qt3DCore::QTransform *pivot_transform = new Qt3DCore::QTransform(pivot_entity);
         pivot_transform->setTranslation(pivot_translations[i]);
         pivot_transform->setRotation(pivot_rotations[i]);
         pivot_entity->addComponent(pivot_transform);
-        Qt3DCore::QEntity *mesh_entity = new Qt3DCore::QEntity(pivot_entity);
-        Qt3DCore::QTransform *mesh_transform = new Qt3DCore::QTransform(mesh_entity);
-        Qt3DRender::QMesh *mesh = new Qt3DRender::QMesh();
+        Qt3DCore::QEntity* mesh_entity = new Qt3DCore::QEntity(pivot_entity);
+        Qt3DCore::QTransform* mesh_transform = new Qt3DCore::QTransform(mesh_entity);
+        Qt3DRender::QMesh* mesh = new Qt3DRender::QMesh();
         Qt3DExtras::QPhongMaterial* band_material = new Qt3DExtras::QPhongMaterial();
         band_material->setDiffuse(Qt::black);
         mesh->setSource(QUrl::fromLocalFile(mesh_addresses[i]));
@@ -947,8 +946,6 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     button_layout->addWidget(microphone_button);
     button_layout->addWidget(clear_button);
 
-    //dashboard_layout->addWidget(microphone_button, 4, 0);
-    //dashboard_layout->addWidget(clear_button, 4, 1);
     setStyleSheet(R"(
         QLabel#sensor {
             color: white;

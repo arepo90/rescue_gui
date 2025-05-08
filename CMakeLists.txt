@@ -2,7 +2,6 @@ cmake_minimum_required(VERSION 3.19)
 project(bruh LANGUAGES CXX)
 
 set(CMAKE_TOOLCHAIN_FILE "C:/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
-#set(VCPKG_TARGET_TRIPLET "x64-windows" CACHE STRING "")
 
 set(TIFF_INCLUDE_DIR "C:/vcpkg/installed/x64-windows/include")
 set(ZLIB_INCLUDE_DIR "C:/vcpkg/installed/x64-windows/include")
@@ -33,20 +32,19 @@ find_package(TIFF REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(LibArchive REQUIRED)
 add_definitions(-DHAVE_OPENCV_CUDA=1)
-#find_package(OpenCV REQUIRED)
-find_package(OpenCV REQUIRED COMPONENTS
-    core
-    imgproc
-    highgui
-    imgcodecs
-    videoio
-    objdetect
-    cudaarithm
-    cudafilters
-    cudaimgproc
-)
+find_package(OpenCV REQUIRED)
+#find_package(OpenCV REQUIRED COMPONENTS
+#    core
+#    imgproc
+#    highgui
+#    imgcodecs
+#    videoio
+#    objdetect
+#    cudaarithm
+#    cudafilters
+#    cudaimgproc
+#)
 
-#find_package(OpenCV REQUIRED)
 
 qt_standard_project_setup()
 

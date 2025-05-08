@@ -56,7 +56,9 @@
 #define AUDIO_BUFFER_SIZE 960       // 960 bytes
 #define SAMPLE_RATE 16000           // 16 kHz
 #define MAX_PACKET_SIZE 65536       // 65539 bytes
-#define CLIENT_IP "127.0.0.1"       //"192.168.0.238"
+// "192.168.50.134" eth
+// "192.168.50.249" wifi
+#define CLIENT_IP "127.0.0.1"
 #define MAX_UDP_PACKET_SIZE 65507   // 65507 bytes
 #define FRAGMENTATION_FLAG 0x8000   // RTP Header flag
 
