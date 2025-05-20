@@ -37,6 +37,7 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/objdetect.hpp>
 #include <opencv2/dnn.hpp>
+//#include <zbar.h>
 #include <opus/opus.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -50,28 +51,27 @@
 #include <iostream>
 #include <random>
 #include <fstream>
+#include <cmath>
 #pragma comment(lib, "ws2_32.lib")
+#define DEG_TO_RAD M_PI / 180.0
+#define MAX_PACKET_SIZE 65536       // 65539 bytes
 
 // --- Comms settings ---
 #define AUDIO_BUFFER_SIZE 960       // 960 bytes
 #define SAMPLE_RATE 16000           // 16 kHz
-#define MAX_PACKET_SIZE 65536       // 65539 bytes
 // "192.168.50.134" eth
 // "192.168.50.249" wifi
 #define CLIENT_IP "127.0.0.1"
 #define MAX_UDP_PACKET_SIZE 65507   // 65507 bytes
 #define FRAGMENTATION_FLAG 0x8000   // RTP Header flag
 
-// --- Hazmat settings ---
+// --- Filter settings ---
 #define CFG_PATH "../../net/yolo.cfg"
 #define WEIGHTS_PATH "../../net/yolo.weights"
 #define LABELS_PATH "../../net/labels.names"
 #define INPUT_SIZE cv::Size(416, 416)
 #define CONF_THRESH 0.8f
 #define NMS_THRESH 0.4f
-
-// --- Rotas prereqs ---
-enum PACKET_TYPE{ SETUP = 0, AUDIO = 1, VIDEO = 2 };
 
 struct RTPHeader {
     uint16_t cc:4;
@@ -110,7 +110,7 @@ enum class PayloadType : uint8_t{
 };
 
 // --- Helper func ---
-int nMap(float n, float minIn, float maxIn, float minOut, float maxOut);
+float nMap(float n, float minIn, float maxIn, float minOut, float maxOut);
 
 // --- Class declarations ---
 
@@ -195,6 +195,7 @@ struct SocketStruct{
     std::atomic<bool> is_send_running;
     std::atomic<bool> is_recv_running;
     std::vector<float> float_data;
+    std::vector<std::string> string_data;
     std::vector<int> int_data;
     std::mutex data_mutex;
     // --- Thingamajig to transfer std::thread ownership ---
@@ -221,15 +222,15 @@ public:
     explicit SubsectionWidget(int id, QWidget *parent = nullptr);
     ~SubsectionWidget();
     void destroy(){ delete this; }
-    void setAvailableDevices(int num_cams);
+    void setAvailableDevices(int num_cams, std::vector<std::string> cam_names);
     void setFullScreenMode(bool fullScreen){
         this->fullScreen = fullScreen;
         QPixmap current = camera_view->pixmap();
+        container->setFixedSize(fullScreen ? QSize(960, 720) : QSize(480, 360));
         camera_view->setPixmap(current.scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
     }
-    void updateAvailableOptions(const QSet<QString> &usedOptions);
     std::pair<int, QString> getCurrentSelection(){ return std::make_pair(cam_id, camera_dropdown->currentText()); }
-    void updateFrame(cv::Mat frame, std::vector<uchar> compressed = {});
+    void updateFrame(cv::Mat frame, cv::Mat thermal = cv::Mat(), std::vector<uchar> compressed = {});
 signals:
     void subsectionClicked(SubsectionWidget *widget);
     void selectionChanged();
@@ -243,26 +244,49 @@ private:
         std::atomic<bool> is_qr_active;
         std::atomic<bool> is_hazmat_active;
         std::atomic<bool> is_shape_active;
-        std::atomic<bool> is_circles1_active;
-        std::atomic<bool> is_circles2_active;
+        std::atomic<bool> is_thermal_active;
+        cv::Mat thermalAdaptiveInterpolation(cv::Mat frame);
+        cv::Mat thermalOverlay(cv::Mat frame, cv::Mat thermal, float distance = 40, float alpha = 0.5);
         cv::Mat placeText(std::string text, cv::Mat frame);
         cv::Mat detectQR(cv::Mat frame);
         cv::Mat detectShape(cv::Mat frame);
-        cv::Mat detectCircles1(cv::Mat frame);
-        cv::Mat detectCircles2(cv::Mat frame);
         cv::Mat detectHazmat(cv::Mat frame);
         std::vector<cv::Scalar> colors;
         std::vector<std::string> labels;
         cv::dnn::DetectionModel hazmat_model;
     };
+    struct FilterSettings{
+        QWidget* qr_container;
+        QWidget* shape_container;
+        QWidget* thermal_container;
+        QHBoxLayout* qr_layout;
+        QHBoxLayout* shape_layout;
+        QHBoxLayout* thermal_layout;
+        QPushButton* qr_button_1;
+        QPushButton* qr_button_2;
+        QPushButton* shape_button_1;
+        QPushButton* shape_button_2;
+        QPushButton* shape_button_3;
+        QPushButton* shape_button_4;
+        QSlider* thermal_slider_1;
+        QSlider* thermal_slider_2;
+        int qr_setting = 0;
+        int shape_setting = 0;
+        int thermal_distance = 40;
+        float thermal_alpha = 0.4;
+        std::mutex settings_mutex;
+    };
+
     Filters filters;
-    QComboBox *camera_dropdown;
-    QComboBox *filter_dropdown;
+    FilterSettings filter_settings;
+    QComboBox* camera_dropdown;
+    QComboBox* filter_dropdown;
     int cam_id;
     int id;
     int num_cams;
     QLabel* camera_view;
     QVBoxLayout* layout;
+    QVBoxLayout* settings;
     QHBoxLayout* dropdowns;
     QWidget* container;
     std::vector<int> availableDevices;
@@ -273,10 +297,12 @@ private:
     std::mutex compressed_mutex;
     std::mutex thermal_mutex;
     cv::Mat latest_frame;
+    cv::Mat thermal_frame;
     cv::Mat filter_frame;
     std::vector<uchar> latest_compressed;
     std::thread cv_thread;
     QImage qt_frame;
+    QSlider* slider;
 };
 
 class MainWindow : public QWidget{
@@ -285,7 +311,8 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     void updateState(std::vector<float> data);
     void updateFrame(int id, std::vector<unsigned char> data);
-    void setCamPorts(int num_cams);
+    void updateThermal(std::vector<float> data);
+    void setCamPorts(int num_cams, std::vector<std::string> cam_names);
     template<typename T> void updateDashbord(int index, T data);
 signals:
     void windowClosing();
@@ -296,6 +323,8 @@ signals:
 protected:
     void closeEvent(QCloseEvent *event) override;
 private:
+    std::mutex thermal_mutex;
+    std::vector<float> thermal_data;
     QHBoxLayout* main_layout;
     QHBoxLayout* button_layout;
     QGridLayout* left_layout;
@@ -327,7 +356,6 @@ private:
     PaError PaErrorCallback(const char *errorText, PaHostApiTypeId hostApiType, PaHostErrorInfo* hostErrorInfo){ return 0; }
     SocketStruct* base_channel;
     SocketStruct* audio_channel;
-    //CompanionStruct* vosk_channel;
     SocketStruct* vosk_channel;
     std::vector<SocketStruct*> video_channels;
     std::atomic<bool> is_audio_active;

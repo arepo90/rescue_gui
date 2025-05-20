@@ -2,14 +2,17 @@ cmake_minimum_required(VERSION 3.19)
 project(bruh LANGUAGES CXX)
 
 set(CMAKE_TOOLCHAIN_FILE "C:/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
+#set(CMAKE_PREFIX_PATH "C:/vcpkg/installed/x64-windows" CACHE STRING "")
 
 set(TIFF_INCLUDE_DIR "C:/vcpkg/installed/x64-windows/include")
 set(ZLIB_INCLUDE_DIR "C:/vcpkg/installed/x64-windows/include")
 set(LibArchive_INCLUDE_DIR "C:/vcpkg/installed/x64-windows/include")
+#set(ZBAR_INCLUDE_DIR "C:/vcpkg/installed/x64-windows/include")
 
 set(TIFF_LIBRARY "C:/vcpkg/installed/x64-windows/lib/tiff.lib")
 set(ZLIB_LIBRARY "C:/vcpkg/installed/x64-windows/lib/zlib.lib")
 set(LibArchive_LIBRARY "C:/vcpkg/installed/x64-windows/lib/archive.lib")
+#set(ZBAR_LIBRARY "C:/vcpkg/installed/x64-windows/lib/zbar.lib")
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core)
 find_package(Qt6 REQUIRED COMPONENTS
@@ -26,12 +29,14 @@ find_package(Qt6 REQUIRED COMPONENTS
 
 find_package(portaudio CONFIG REQUIRED)
 find_package(Opus CONFIG REQUIRED)
+#list(APPEND CMAKE_MODULE_PATH "C:/vcpkg/installed/x64-windows/share/mchehab-zbar/zbar")
+#find_package(ZBar REQUIRED)
 list(APPEND CMAKE_MODULE_PATH "C:/vcpkg/installed/x64-windows/share/ffmpeg")
 find_package(FFMPEG REQUIRED)
 find_package(TIFF REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(LibArchive REQUIRED)
-add_definitions(-DHAVE_OPENCV_CUDA=1)
+#add_definitions(-DHAVE_OPENCV_CUDA=1)
 find_package(OpenCV REQUIRED)
 #find_package(OpenCV REQUIRED COMPONENTS
 #    core
@@ -44,7 +49,6 @@ find_package(OpenCV REQUIRED)
 #    cudafilters
 #    cudaimgproc
 #)
-
 
 qt_standard_project_setup()
 
@@ -73,6 +77,7 @@ target_link_libraries(bruh PRIVATE
     LibArchive::LibArchive
     ZLIB::ZLIB
     TIFF::TIFF
+    #ZBar::ZBar
 )
 
 include(GNUInstallDirs)

@@ -1,7 +1,10 @@
 #include "mainwindow.h"
 
+std::pair<float, float> THERMAL_FOV{60.0, 60.0};
+std::pair<float, float> CAM_FOV{80.0, 45.0};
+
 // --- Helper funcs ---
-int nMap(float n, float minIn, float maxIn, float minOut, float maxOut){
+float nMap(float n, float minIn, float maxIn, float minOut, float maxOut){
     return (n - minIn) / (maxIn - minIn) * (maxOut - minOut) + minOut;
 }
 
@@ -26,7 +29,7 @@ std::vector<int> Controller::readState(){
         if(std::abs(states[i]) < dead_zone)
             states[i] = 0;
         else
-            states[i] = nMap(states[i], -32768, 32768, -255, 255);
+            states[i] = static_cast<int>(nMap(states[i], -32768, 32768, -255, 255));
     }
     states.push_back(state.Gamepad.bLeftTrigger);
     states.push_back(state.Gamepad.bRightTrigger);
@@ -92,17 +95,17 @@ void ModelWidget::updateState(BasePacket model_state){
 
     QColor color;
     if(model_state.track_l < 0.0)
-        color = QColor(nMap(model_state.track_l, -1.0, 0.0, 20, 250), 0, 0);
+        color = QColor((int)nMap(model_state.track_l, -1.0, 0.0, 20, 250), 0, 0);
     else if(model_state.track_l > 0.0)
-        color = QColor(0, nMap(model_state.track_l, 0.0, 1.0, 20, 250), 0);
+        color = QColor(0, (int)nMap(model_state.track_l, 0.0, 1.0, 20, 250), 0);
     else
         color = Qt::black;
     updateColor(1, color);
 
     if(model_state.track_r < 0)
-        color = QColor(nMap(model_state.track_r, -1.0, 0.0, 20, 250), 0, 0);
+        color = QColor((int)nMap(model_state.track_r, -1.0, 0.0, 20, 250), 0, 0);
     else if(model_state.track_r > 0)
-        color = QColor(0, nMap(model_state.track_r, 0.0, 1.0, 20, 250), 0);
+        color = QColor(0, (int)nMap(model_state.track_r, 0.0, 1.0, 20, 250), 0);
     else
         color = Qt::black;
     updateColor(0, color);
@@ -247,44 +250,142 @@ void ModelWidget::updateColor(int index, QColor color){
 // --- cam subsections ---
 SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     this->id = id;
+    cam_id = -1;
     container = new QWidget(this);
+    container->setFixedSize(480, 360);
     layout = new QVBoxLayout();
+    settings = new QVBoxLayout();
     dropdowns = new QHBoxLayout();
     camera_view = new QLabel();
+
+    camera_view->setStyleSheet("border: 1px solid gray;");
     camera_dropdown = new QComboBox();
     camera_dropdown->addItem("No Camera");
     filter_dropdown = new QComboBox();
-    filter_dropdown->addItems({ "No filter", "QR Code", "Hazmat", "Shape - Hough", "Circles - Gap", "Circles - Rays" });
+    filter_dropdown->addItems({ "No filter", "QR Code", "Hazmat", "Shape", "Thermal" });
     filter_dropdown->setEnabled(false);
-    cam_id = -1;
     dropdowns->addWidget(camera_dropdown);
     dropdowns->addWidget(filter_dropdown);
     layout->addLayout(dropdowns);
     layout->addWidget(camera_view);
+    layout->addLayout(settings);
     layout->setSpacing(0);
     layout->setContentsMargins(0, 0, 0, 0);
     container->setLayout(layout);
-    container->setStyleSheet("border: 0.5px solid gray;");
+
     is_cv_running.store(true);
     filters.none.store(true);
     filters.is_qr_active.store(false);
     filters.is_shape_active.store(false);
-    filters.is_circles1_active.store(false);
-    filters.is_circles2_active.store(false);
+    filters.is_thermal_active.store(false);
     filters.is_hazmat_active.store(false);
+
+    filter_settings.qr_container = new QWidget();
+    filter_settings.shape_container = new QWidget();
+    filter_settings.thermal_container = new QWidget();
+    filter_settings.qr_layout = new QHBoxLayout();
+    filter_settings.shape_layout = new QHBoxLayout();
+    //filter_settings.thermal_layout = new QHBoxLayout();
+    QGridLayout* thermal_layout = new QGridLayout();
+    filter_settings.qr_button_1 = new QPushButton("OpenCV (local)");
+    filter_settings.qr_button_2 = new QPushButton("ZBar (companion");
+    filter_settings.thermal_slider_1 = new QSlider(Qt::Horizontal);
+    filter_settings.thermal_slider_2 = new QSlider(Qt::Horizontal);
+
+    filter_settings.thermal_slider_1->setRange(10, 100);
+    filter_settings.thermal_slider_1->setValue(40);
+    filter_settings.thermal_slider_1->setTickInterval(5);
+    connect(filter_settings.thermal_slider_1, &QSlider::sliderMoved, this, [this](int value){
+        qDebug() << "slider 1, val: " << value;
+        std::lock_guard<std::mutex> lock(filter_settings.settings_mutex);
+        filter_settings.thermal_distance = value;
+    });
+    filter_settings.thermal_slider_2->setRange(0, 10);
+    filter_settings.thermal_slider_2->setValue(4);
+    filter_settings.thermal_slider_2->setTickInterval(1);
+    connect(filter_settings.thermal_slider_2, &QSlider::sliderMoved, this, [this](int value){
+        qDebug() << "slider 2, val: " << value << " alpha: " << (float)value / 10.0;
+        std::lock_guard<std::mutex> lock(filter_settings.settings_mutex);
+        filter_settings.thermal_alpha = (float)value / 10.0;
+    });
+    //filter_settings.thermal_layout->setSpacing(0);
+    //filter_settings.thermal_layout->setContentsMargins(0, 0, 0, 0);
+    //filter_settings.thermal_layout->addWidget(filter_settings.thermal_slider_1);
+    //filter_settings.thermal_layout->addWidget(filter_settings.thermal_slider_2);
+    //filter_settings.thermal_container->setLayout(filter_settings.thermal_layout);
+
+    QLabel* thermal_label_1 = new QLabel("Distance (cm)");
+    QLabel* thermal_label_2 = new QLabel("Opacity");
+    thermal_layout->addWidget(thermal_label_1, 0, 0);
+    thermal_layout->addWidget(filter_settings.thermal_slider_1, 0, 1);
+    thermal_layout->addWidget(thermal_label_2, 1, 0);
+    thermal_layout->addWidget(filter_settings.thermal_slider_2, 1, 1);
+    thermal_layout->setSpacing(0);
+    thermal_layout->setContentsMargins(0, 0, 0, 0);
+
+    filter_settings.thermal_container->setLayout(thermal_layout);
+    filter_settings.thermal_container->hide();
+
+    filter_settings.qr_button_1->setCheckable(true);
+    filter_settings.qr_button_1->setStyleSheet(R"(
+        QPushButton {
+            color: white;
+            background-color: black;
+        }
+        QPushButton:checked {
+            background-color: gray;
+        }
+    )");
+    connect(filter_settings.qr_button_1, &QPushButton::clicked, this, [this](){
+        qDebug() << "qr button 1 pressed";
+        if(filter_settings.qr_button_2->isChecked())
+            filter_settings.qr_button_2->setChecked(false);
+        std::lock_guard<std::mutex> lock(filter_settings.settings_mutex);
+        filter_settings.qr_setting = 0;
+    });
+    connect(filter_settings.qr_button_2, &QPushButton::clicked, this, [this](){
+        qDebug() << "qr button 2 pressed";
+        if(filter_settings.qr_button_1->isChecked())
+            filter_settings.qr_button_1->setChecked(false);
+        std::lock_guard<std::mutex> lock(filter_settings.settings_mutex);
+        filter_settings.qr_setting = 1;
+    });
+    filter_settings.qr_button_2->setCheckable(true);
+    filter_settings.qr_button_2->setStyleSheet(R"(
+        QPushButton {
+            color: white;
+            background-color: black;
+        }
+        QPushButton:checked {
+            background-color: gray;
+        }
+    )");
+    filter_settings.qr_layout->setSpacing(0);
+    filter_settings.qr_layout->setContentsMargins(0, 0, 0, 0);
+    filter_settings.qr_layout->addWidget(filter_settings.qr_button_1);
+    filter_settings.qr_layout->addWidget(filter_settings.qr_button_2);
+    filter_settings.qr_container->setLayout(filter_settings.qr_layout);
+    filter_settings.qr_container->hide();
+
+    settings->addWidget(filter_settings.qr_container);
+    settings->addWidget(filter_settings.shape_container);
+    settings->addWidget(filter_settings.thermal_container);
+    settings->addStretch();
+
     cv_thread = std::thread([this](){
         while(is_cv_running.load()){
             if(filters.none.load()){
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 continue;
             }
-            cv::Mat frame;
+            cv::Mat frame, thermal;
             {
                 std::lock_guard<std::mutex> lock(frame_mutex);
                 frame = latest_frame;
+                thermal = thermal_frame;
             }
             if(frame.empty()){
-                qDebug() << "empty frame";
+                qWarning() << "Empty frame on cv";
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 continue;
             }
@@ -294,10 +395,18 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
                 frame = filters.detectHazmat(frame);
             else if(filters.is_shape_active.load())
                 frame = filters.detectShape(frame);
-            else if(filters.is_circles1_active.load())
-                frame = filters.detectCircles1(frame);
-            else if(filters.is_circles2_active.load())
-                frame = filters.detectCircles2(frame);
+            else if(filters.is_thermal_active.load()){
+                int distance = 0;
+                float opacity = 0.0;
+                {
+                    std::lock_guard<std::mutex> lock(filter_settings.settings_mutex);
+                    distance = filter_settings.thermal_distance;
+                    opacity = filter_settings.thermal_alpha;
+                }
+                thermal = filters.thermalAdaptiveInterpolation(thermal);
+                frame = filters.thermalOverlay(frame, thermal, distance, opacity);
+                //frame = process_camera_frames(frame, thermal, 40, 0.5);
+            }
             else{
                 qWarning() << "SUBSECTION " << this->id << " CV LOOP | Invalid marker: no active filter";
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -325,14 +434,35 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
         filters.is_qr_active.store(index == 1);
         filters.is_hazmat_active.store(index == 2);
         filters.is_shape_active.store(index == 3);
-        filters.is_circles1_active.store(index == 4);
-        filters.is_circles2_active.store(index == 5);
+        filters.is_thermal_active.store(index == 4);
+
+        if(index == 0){
+            filter_settings.qr_container->hide();
+            filter_settings.shape_container->hide();
+            filter_settings.thermal_container->hide();
+        }
+        else if(index == 1){
+            filter_settings.shape_container->hide();
+            filter_settings.thermal_container->hide();
+            filter_settings.qr_container->show();
+        }
+        else if(index == 4){
+            filter_settings.thermal_container->show();
+            filter_settings.qr_container->hide();
+            filter_settings.shape_container->hide();
+        }
+        else{
+            filter_settings.qr_container->hide();
+            filter_settings.shape_container->hide();
+            filter_settings.thermal_container->hide();
+        }
     });
+
     camera_view->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    camera_view->setPixmap(QPixmap("../../assets/404.png").scaled((this->fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
+    camera_view->setPixmap(QPixmap("../../assets/404.png").scaled((this->fullScreen ? QSize(960, 720) : QSize(480, 270)), Qt::KeepAspectRatio));
     connect(this, &SubsectionWidget::frameReady, this, [this](QImage image){
         if(!image.isNull())
-            camera_view->setPixmap(QPixmap::fromImage(qt_frame).scaled((this->fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
+            camera_view->setPixmap(QPixmap::fromImage(qt_frame).scaled((this->fullScreen ? QSize(960, 720) : QSize(480, 270)), Qt::KeepAspectRatio));
         else
             qCritical() << "SUBSECTION " << this->id << " FRAME READY | Invalid image: frame is null";
     });
@@ -360,6 +490,56 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     filters.hazmat_model.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
 }
 
+// --- Visual filters ---
+cv::Mat SubsectionWidget::Filters::thermalAdaptiveInterpolation(cv::Mat frame){
+    double min_val, max_val;
+    cv::Mat grad_x, grad_y, output;
+    cv::resize(frame, frame, cv::Size(64, 64), 0, 0, cv::INTER_CUBIC);
+    cv::minMaxLoc(frame, &min_val, &max_val);
+    cv::Sobel(frame, grad_x, CV_32F, 1, 0, 3);
+    cv::Sobel(frame, grad_y, CV_32F, 0, 1, 3);
+    cv::magnitude(grad_x, grad_y, output);
+    cv::resize(output, output, cv::Size(64, 64), 0, 0, cv::INTER_LINEAR);
+    cv::normalize(output, output, 0, 1, cv::NORM_MINMAX);
+    for(int i = 0; i < frame.rows; i++){
+        for(int j = 0; j < frame.cols; j++){
+            output.at<float>(i, j) = frame.at<float>(i, j) * (1.0f + output.at<float>(i, j) * 0.3f);
+        }
+    }
+    cv::normalize(output, output, min_val, max_val, cv::NORM_MINMAX);
+    cv::normalize(output, output, 0, 255, cv::NORM_MINMAX);
+    output.convertTo(output, CV_8U);
+    cv::applyColorMap(output, output, cv::COLORMAP_JET);
+    //cv::resize(output, output, cv::Size(1280, 720), cv::INTER_CUBIC);
+    cv::resize(output, output, cv::Size(1280, 720), cv::INTER_NEAREST);
+    return output;
+}
+
+cv::Mat SubsectionWidget::Filters::thermalOverlay(cv::Mat frame, cv::Mat thermal, float distance, float alpha){
+    float cam_width = 2.0 * distance * tan(CAM_FOV.first / 2.0 * DEG_TO_RAD), cam_height = 2.0 * distance * tan(CAM_FOV.second / 2.0 * DEG_TO_RAD),
+          thermal_width = 2.0 * distance * tan(THERMAL_FOV.first / 2.0 * DEG_TO_RAD), thermal_height = 2.0 * distance * tan(THERMAL_FOV.second / 2.0 * DEG_TO_RAD);
+    float left = max(-thermal_width/2.0, 7.0-(cam_width/2.0)), right = min(thermal_width/2.0, 7.0+(cam_width/2.0)),
+          up = min(thermal_height/2.0, (cam_height/2.0)-6.0), down = max(-thermal_height/2.0, 6.0-(cam_height/2.0));
+    int cam_overlap_width = (right-left) / cam_width * frame.cols, cam_overlap_height = (up-down) / cam_height * frame.rows,
+          thermal_overlap_width = (right-left) / thermal_width * thermal.cols, thermal_overlap_height = (up-down) / thermal_height * thermal.rows;
+    //qDebug() << cam_width << " " << thermal_width << " " << left << " " << right << " " << cam_overlap_width << " " << thermal_overlap_width;
+    //qDebug() << cam_height << " " << thermal_height << " " << up << " " << down << " " << cam_overlap_height << " " << thermal_overlap_height;
+    //qDebug() << thermal.cols-thermal_overlap_width << " " << thermal.cols-thermal_overlap_height << " " << thermal_overlap_width << " " << thermal_overlap_height;
+    if(thermal_overlap_width <= 0 || thermal_overlap_height <= 0 || cam_overlap_width <= 0 || cam_overlap_height <= 0) return this->placeText("bounds error", frame);
+    cv::Rect thermal_overlap(thermal.cols-thermal_overlap_width, thermal.rows-thermal_overlap_height, thermal_overlap_width, thermal_overlap_height);
+    //qDebug() << frame.cols-cam_overlap_width << " " << frame.cols-cam_overlap_height << " " << cam_overlap_width << " " << cam_overlap_height;
+    cv::Rect frame_overlap(0, 0, cam_overlap_width, cam_overlap_height);
+    frame = frame(frame_overlap);
+    //qDebug() << "done frame";
+    //qDebug() << "thermal: " << thermal.cols << " " << thermal.rows << " " << thermal_overlap.x << " " << thermal_overlap.y << " " << thermal_overlap.width << " " << thermal_overlap.height;
+    thermal = thermal(thermal_overlap);
+    //qDebug() << "done thermal";
+    cv::resize(frame, frame, cv::Size(1280, 720), cv::INTER_NEAREST);
+    cv::resize(thermal, thermal, cv::Size(1280, 720), cv::INTER_NEAREST);
+    cv::addWeighted(frame, 1.0 - alpha, thermal, alpha, 0.0, frame);
+    return frame;
+}
+
 cv::Mat SubsectionWidget::Filters::detectHazmat(cv::Mat frame){
     int H = frame.rows;
     int W = frame.cols;
@@ -367,6 +547,8 @@ cv::Mat SubsectionWidget::Filters::detectHazmat(cv::Mat frame){
     std::vector<float> confidences;
     std::vector<cv::Rect> boxes;
     hazmat_model.detect(frame, classIds, confidences, boxes, CONF_THRESH, NMS_THRESH);
+    if(classIds.empty())
+        return this->placeText("NO HAZMAT DETECTED", frame);
 
     for(int i = 0; i < classIds.size(); i++) {
         int cid = classIds[i];
@@ -385,7 +567,6 @@ cv::Mat SubsectionWidget::Filters::detectHazmat(cv::Mat frame){
     return frame;
 }
 
-// --- Visual filters ---
 cv::Mat SubsectionWidget::Filters::placeText(std::string text, cv::Mat frame){
     int temp = 0;
     cv::Size text_size = cv::getTextSize(text,  cv::FONT_HERSHEY_SIMPLEX, 3.5, 3, &temp);
@@ -407,6 +588,7 @@ cv::Mat SubsectionWidget::Filters::detectQR(cv::Mat frame){
     return frame;
 }
 
+/*
 cv::Mat SubsectionWidget::Filters::detectCircles1(cv::Mat frame){
     double scale = 4;
     int rad_checks = 20;
@@ -465,8 +647,6 @@ cv::Mat SubsectionWidget::Filters::detectCircles1(cv::Mat frame){
     cv::Rect roi2 = cv::boundingRect(mask_roi);
     final_roi = final_roi(roi2);
     cv::resize(final_roi, final_roi, cv::Size(), scale, scale, cv::INTER_LINEAR);
-    cv::threshold(final_roi, thresh, 120, 255, cv::THRESH_BINARY);
-    cv::morphologyEx(thresh, thresh, cv::MORPH_OPEN, kernel, cv::Point(-1, -1), 2);
 
     std::vector<std::vector<cv::Point>> contours;
     cv::findContours(thresh, contours, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE);
@@ -686,6 +866,7 @@ cv::Mat SubsectionWidget::Filters::detectCircles2(cv::Mat frame){
 
     return frame;
 }
+*/
 
 cv::Mat SubsectionWidget::Filters::detectShape(cv::Mat frame){
     float scale = 4.0;
@@ -725,6 +906,7 @@ cv::Mat SubsectionWidget::Filters::detectShape(cv::Mat frame){
     if(frame_roi.empty() || frame_roi.rows < 8 || frame_roi.cols < 8)
         return this->placeText("MISSING TASK SECTOR", frame);
 
+    /*
     std::vector<cv::Vec3f> inner_circles_vec;
     cv::HoughCircles(frame_roi, inner_circles_vec, cv::HOUGH_GRADIENT, 1, frame_roi.rows/8.0, 100, 50, frame_roi.rows/8, frame_roi.rows/3);
     if(inner_circles_vec.empty())
@@ -735,6 +917,8 @@ cv::Mat SubsectionWidget::Filters::detectShape(cv::Mat frame){
     cv::circle(mask_roi, cv::Point(cvRound(inner_circle[0]), cvRound(inner_circle[1])), cvRound(inner_circle[2]) - 10, cv::Scalar(255), -1);
     cv::bitwise_and(frame_roi, frame_roi, final_roi, mask_roi);
     cv::threshold(final_roi, final_thresh, 200, 255, cv::THRESH_BINARY);
+    */
+    cv::Mat final_roi = frame_roi.clone(), final_thresh;
 
     std::vector<std::vector<cv::Point>> contours;
     std::vector<cv::Vec4i> hierarchy;
@@ -795,32 +979,19 @@ cv::Mat SubsectionWidget::Filters::detectShape(cv::Mat frame){
 }
 
 SubsectionWidget::~SubsectionWidget(){
-    camera_dropdown->setCurrentIndex(0);
     filters.none.store(true);
     is_cv_running.store(false);
     emit destructorCalled(id);
     cv_thread.join();
 }
 
-void SubsectionWidget::updateAvailableOptions(const QSet<QString> &usedOptions) {
-    return;
-    auto * model = qobject_cast<QStandardItemModel*>(camera_dropdown->model());
-    if(!model) return;
-    for(int i = 0; i < camera_dropdown->count(); i++){
-        QString option = camera_dropdown->itemText(i);
-        auto * item = model->item(i);
-        if(!item) continue;
-        item->setEnabled(!usedOptions.contains(option));
-    }
-}
-
-void SubsectionWidget::setAvailableDevices(int num_cams) {
+void SubsectionWidget::setAvailableDevices(int num_cams, std::vector<std::string> cam_names) {
     for(int i = 1; i <= num_cams; i++){
-        camera_dropdown->addItem(QString("Camera %1").arg(i), i);
+        camera_dropdown->addItem(QString::fromStdString(cam_names[i-1]), i);
     }
 }
 
-void SubsectionWidget::updateFrame(cv::Mat frame, std::vector<uchar> compressed){
+void SubsectionWidget::updateFrame(cv::Mat frame, cv::Mat thermal, std::vector<uchar> compressed){
     {
         std::lock_guard<std::mutex> lock(compressed_mutex);
         latest_compressed = compressed;
@@ -828,6 +999,7 @@ void SubsectionWidget::updateFrame(cv::Mat frame, std::vector<uchar> compressed)
     {
         std::lock_guard<std::mutex> lock(frame_mutex);
         latest_frame = frame;
+        thermal_frame = thermal;
     }
     if(!filters.none.load()){
         std::lock_guard<std::mutex> lock(filter_mutex);
@@ -876,8 +1048,9 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
                 if(fullscreen_widget){
                     clicked_widget->hide();
                     for(int k = 0; k < subsections.size(); k++){
-                        subsections[k]->setMinimumSize(QSize(480, 360));
-                        subsections[k]->setMaximumSize(QSize(480, 360));
+                        //subsections[k]->setMinimumSize(QSize(480, 360));
+                        //subsections[k]->setMaximumSize(QSize(480, 360));
+                        subsections[k]->setFixedSize(QSize(480, 360));
                         left_layout->addWidget(subsections[k], k/2, k%2);
                         subsections[k]->setFullScreenMode(false);
                         subsections[k]->show();
@@ -889,8 +1062,9 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
                     for(SubsectionWidget* sw : subsections){
                         sw->hide();
                     }
-                    clicked_widget->setMaximumSize(QSize(960, 720));
-                    clicked_widget->setMinimumSize(QSize(960, 720));
+                    //clicked_widget->setMaximumSize(QSize(960, 720));
+                    //clicked_widget->setMinimumSize(QSize(960, 720));
+                    clicked_widget->setFixedSize(QSize(960, 720));
                     left_layout->addWidget(clicked_widget, 0, 0, 2, 2);
                     clicked_widget->setFullScreenMode(true);
                     clicked_widget->show();
@@ -907,9 +1081,6 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
                     }
                     else
                         cam_map[k] = -1;
-                }
-                for(int k = 0; k < subsections.size(); k++){
-                    subsections[k]->updateAvailableOptions(used_options);
                 }
                 emit selectionChanged(cam_map);
             });
@@ -993,9 +1164,9 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     main_layout->addLayout(right_layout, 1);  // 1/4 width
 }
 
-void MainWindow::setCamPorts(int num_cams){
+void MainWindow::setCamPorts(int num_cams, std::vector<std::string> cam_names){
     for(int i = 0; i < subsections.size(); i++){
-        subsections[i]->setAvailableDevices(num_cams);
+        subsections[i]->setAvailableDevices(num_cams, cam_names);
     }
 }
 
@@ -1010,10 +1181,17 @@ void MainWindow::updateFrame(int id, std::vector<unsigned char> data){
             sub_ids.push_back(it->first);
         }
     }
+    std::vector<float> thermal_floats;
+    {
+        std::lock_guard<std::mutex> lock(thermal_mutex);
+        thermal_floats = thermal_data;
+    }
+    cv::Mat thermal = cv::Mat(8, 8, CV_32F);
+    std::memcpy(thermal.data, thermal_floats.data(), thermal_floats.size()*sizeof(float));
     if(sub_id != -1){
         //subsections[sub_id]->updateFrame(frame, data);
         for(int i = 0; i < sub_ids.size(); i++){
-            subsections[sub_ids[i]]->updateFrame(frame.clone(), data);
+            subsections[sub_ids[i]]->updateFrame(frame.clone(), thermal.clone(), data);
         }
     }
 }
@@ -1031,7 +1209,7 @@ template<typename T> void MainWindow::updateDashbord(int index, T data){
     }
     else if(index == 2){
         if constexpr(std::is_same_v<T, QVector3D>)
-            magnetometer_label->setText(QString("X: %1 Y: %2\nZ: %3").arg(data.x(), 0, 'f', 2).arg(data.y(), 0, 'f', 2).arg(data.z(), 0, 'f', 2));
+            magnetometer_label->setText(QString("X: %1\nY: %2\nZ: %3").arg(data.x(), 0, 'f', 2).arg(data.y(), 0, 'f', 2).arg(data.z(), 0, 'f', 2));
     }
     else
         qWarning() << "WINDOW UPDATE | Invalid dashboard index: out of bounds";
@@ -1058,6 +1236,11 @@ void MainWindow::updateState(std::vector<float> data){
     updateDashbord(0, (int)model_state.gas_ppm);
     updateDashbord(2, QVector3D(model_state.magnetometer_x, model_state.magnetometer_y, model_state.magnetometer_z));
     emit modelUpdated(model_state);
+}
+
+void MainWindow::updateThermal(std::vector<float> data){
+    std::lock_guard<std::mutex> lock(thermal_mutex);
+    thermal_data = data;
 }
 
 // --- ROTAS stream handler ---
@@ -1183,24 +1366,24 @@ void RTPStreamHandler::recvPacket(){
         i++;
     } while(i < num_fragments);
 
+    /*
     if(stream->payload_type == PayloadType::ROS2_ARRAY && floatCallback){
         std::vector<float> data(packet.size() / sizeof(float));
         std::memcpy(data.data(), packet.data(), packet.size());
         floatCallback(data);
     }
-    else if((stream->payload_type == PayloadType::VIDEO_MJPEG || stream->payload_type == PayloadType::AUDIO_PCM) && ucharCallback){
+    else */if(/*(stream->payload_type == PayloadType::VIDEO_MJPEG || stream->payload_type == PayloadType::AUDIO_PCM) &&*/ ucharCallback){
         std::vector<uchar> data(packet.size());
         std::memcpy(data.data(), packet.data(), packet.size());
         ucharCallback(data);
     }
-    else
-        qCritical() << "ROTAS RECV | Invalid packet data: mismatched payload/callback";
 }
 
 // --- Universal ---
 AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
     qInfo() << "Starting GUI...";
     window = new MainWindow;
+    qDebug() << "?";
     window->setWindowTitle("GUI - beta");
     window->resize(1280, 720);
     QObject::connect(window, &MainWindow::windowClosing, [this](){ this->destroy(); });
@@ -1209,16 +1392,31 @@ AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
     qInfo() << "Starting base channel...";
     base_channel = new SocketStruct;
     base_channel->target_socket = new RTPStreamHandler(port, CLIENT_IP, PayloadType::ROS2_ARRAY);
-    base_channel->target_socket->setFloatCallback([this](std::vector<float> data){
-        if(data.size() < sizeof(BasePacket)/sizeof(float)){
+    base_channel->target_socket->setUCharCallback([this](std::vector<uchar> data){
+        if(data.size() < sizeof(BasePacket)+sizeof(float)){
             qCritical() << "APPHANDLER BASE CB | Invalid payload: incomplete data";
             return;
         }
+        std::vector<float> float_data((sizeof(BasePacket)/sizeof(float))+1), thermal(64);
+        std::vector<std::string> string_data;
+        int offset = sizeof(BasePacket) + sizeof(float);
+        std::memcpy(float_data.data(), data.data(), offset);
+        for(int i = 0; i < (int)float_data[0]; i++){
+            int str_size;
+            std::memcpy(&str_size, data.data()+offset, sizeof(int));
+            std::vector<char> str(str_size);
+            std::memcpy(str.data(), data.data()+offset+sizeof(int), str_size);
+            string_data.push_back(std::string(str.begin(), str.end()));
+            offset += sizeof(int) + str_size;
+        }
+        std::memcpy(thermal.data(), data.data()+offset, 64*sizeof(float));
         {
             std::lock_guard<std::mutex> lock(base_channel->data_mutex);
-            base_channel->float_data = data;
+            base_channel->float_data = float_data;
+            base_channel->string_data = string_data;
         }
-        window->updateState(std::vector<float>(data.begin()+1, data.end()));
+        window->updateState(std::vector<float>(float_data.begin()+1, float_data.end()));
+        window->updateThermal(thermal);
     });
     base_channel->is_recv_running.store(true);
     base_channel->is_send_running.store(true);
@@ -1229,17 +1427,15 @@ AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
     vosk_channel->target_socket = new RTPStreamHandler(9000, "127.0.0.1", PayloadType::AUDIO_PCM);
     vosk_channel->target_socket->setUCharCallback([this](std::vector<uchar> data){
         std::string str(data.begin(), data.end());
-        window->updateDashbord(1, QString::fromUtf8(str.c_str()));
+        window->updateDashbord(1, QString::fromStdString(str));
     });
     vosk_channel->is_recv_running.store(true);
     vosk_channel->is_send_running.store(true);
     audio_channel = new SocketStruct;
     audio_channel->target_socket = new RTPStreamHandler(port + 2, CLIENT_IP, PayloadType::AUDIO_PCM);
     audio_channel->target_socket->setUCharCallback([this](std::vector<uchar> data){
-        if(vosk_channel->is_send_running.load()){
-            //vosk_channel->companion->write(data, 2);
-            vosk_channel->target_socket->sendPacket(data, 2);
-        }
+        if(vosk_channel->is_send_running.load())
+            vosk_channel->target_socket->sendPacket(data, 1);
         std::vector<opus_int16> output(AUDIO_BUFFER_SIZE);
         int frames = opus_decode(opus_decoder, data.data(), data.size(), output.data(), output.size(), 0);
         Pa_WriteStream(stream, output.data(), frames);
@@ -1284,7 +1480,8 @@ AppHandler::~AppHandler(){
     vosk_channel->target_socket->destroy();
     if(vosk_channel->recv_thread.joinable())
         vosk_channel->recv_thread.join();
-    qDebug() << "vosk thread joined";
+    qInfo() << "Companion thread joined";
+
     audio_channel->is_recv_running.store(false);
     audio_channel->is_send_running.store(false);
     audio_channel->target_socket->destroy();
@@ -1313,6 +1510,7 @@ AppHandler::~AppHandler(){
 void AppHandler::init(){
     qInfo() << "Starting ROTAS stream...";
     int num_cams = 0;
+    std::vector<std::string> cam_names;
     qInfo() << "Awaiting response...";
     base_channel->target_socket->recvPacket();
     base_channel->target_socket->sendPacket(std::vector<int>{0, 0});
@@ -1323,9 +1521,10 @@ void AppHandler::init(){
             return;
         }
         num_cams = (int)base_channel->float_data[0];
+        cam_names = base_channel->string_data;
     }
     qInfo() << "Connection established. Received " << num_cams << " video sources";
-    window->setCamPorts(num_cams);
+    window->setCamPorts(num_cams, cam_names);
 
     base_channel->recv_thread = std::thread([this](){
         while(base_channel->is_recv_running.load()){
@@ -1342,7 +1541,7 @@ void AppHandler::init(){
         video_channels[i]->is_active.store(false);
         video_channels[i]->is_send_running.store(true);
         video_channels[i]->is_recv_running.store(true);
-        video_channels[i]->target_socket->setUCharCallback([this, i](std::vector<uchar> data) { window->updateFrame(i, data); });
+        video_channels[i]->target_socket->setUCharCallback([this, i](std::vector<uchar> data){ window->updateFrame(i, data); });
         video_channels[i]->recv_thread = std::thread([i, this](){
             while(video_channels[i]->is_recv_running.load()){
                 video_channels[i]->target_socket->recvPacket();
