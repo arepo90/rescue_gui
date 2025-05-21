@@ -15,7 +15,7 @@ In general, different conventions are used to refer to different concepts:
 
 ## Terminology
 
-- A **setting** is the initial state of a variable that alters the how a function or the program as a  workwhole (it's not modified during the program's execution). 
+- A **setting** is the initial state of a variable that alters the how a function or the program as a whole work (it's not modified during the program's execution). 
 - A **channel** is an instance of `SocketStruct`, and refers to an object capable of handling two-way data transmission through ROTAS.
 - A **payload** is the relevant data or information sent inside a packet.
 - A **packet** is an entire data structure meant for transmission. Contains a header and one or more payloads.
