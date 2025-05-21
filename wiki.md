@@ -148,7 +148,7 @@ These preprocessor definitions directly modify the behavior of the ROTAS stream.
 - `NMS_THRESH`: be a valid non-maximum-suppression threshold (for hazmat detection; from `0.0f` to `1.0f`).
 
 > [!IMPORTANT]
-> Excluding the IP address, **all** values must match those found on the GUI.
+> Excluding the IP address, **all** values must match those found on the relay.
 
 ## Helpers
 
