@@ -6,16 +6,16 @@ The following is a full explanation of the Graphical User Interface program.
 
 In general, different conventions are used to refer to different concepts:
 
-- **ALL_CAPS**: Constant or permanent declarations, generally stated as preprocessor definitions (i.e.: `const` or `#define`).
+- **ALL_CAPS**: Constant or permanent declarations, generally stated as preprocessor definitions (i.e. `const` or `#define`).
 - **snake_case**: Variables of all kinds, pointers and object instances.
 - **camelCase**: Class methods and functions of any kind.
 - **PascalCase**: Struct, class, and object names and declarations.
 
-> If you find a case where this is not true (like a float using camelCase or a function using snake_case), that's a mistake and should be corrected soon.
+> If you find an instance where this is not true (like a float using camelCase or a function using snake_case), that's a mistake and should be corrected soon.
 
 ## Terminology
 
-- A **setting** is the initial state of a variable that alters the functioning of a function or the program as a whole, although it's not altered nor modified. 
+- A **setting** is the initial state of a variable that alters the how a function or the program as a  workwhole (it's not modified during the program's execution). 
 - A **channel** is an instance of `SocketStruct`, and refers to an object capable of handling two-way data transmission through ROTAS.
 - A **payload** is the relevant data or information sent inside a packet.
 - A **packet** is an entire data structure meant for transmission. Contains a header and one or more payloads.
