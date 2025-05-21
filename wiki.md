@@ -173,7 +173,9 @@ These preprocessor definitions directly modify the behavior of the ROTAS stream.
   - `_data`: Internal data buffers.
   - `data_mutex`: Concurrency control for internal buffers used to handle get/set operations in different threads.
 
-The `nMap()` function maps a value in an input range to its corresponding output in an output range. 
+The `nMap()` function maps a value in an input range to its corresponding value in an output range. 
+
+# Class descriptions
 
 ## ConsoleWindow
 
