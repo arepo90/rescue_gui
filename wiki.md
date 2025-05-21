@@ -32,6 +32,7 @@ In general, different conventions are used to refer to different concepts:
 - A **video frame** is an image captured from a video source, streamed through a video channel at standard resolution.
 - A **thermal frame** is an image constructed from the 8x8 thermal sensor, streamed through the base channel.
 - A **subsection** is an instance of the `SubsectionWidget` video feed viewer.
+- **Concurrency control** is a series of techniques used to prevent race conditions and data corruption caused by simultaneous get/set operations on data from different threads (generally marked by the use of _std::atomic_ variables or _std::lock_guard_ clauses). 
 
 ## File structure
 
