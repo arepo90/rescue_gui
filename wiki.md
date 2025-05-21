@@ -64,7 +64,7 @@ They are, in increasing order of severity:
 
 The GUI is a Qt application, and as such, it is built using Qt's libraries and dependencies. It serves as a review and data processing center for the robot's data, making use of the superior computing power compared to the robot's devices.
 
-The code logic is sepparated in classes that serve as _Widgets_ and each widget is represented by a `QWidget` _container_, to which all other sub-parts are bound to as children. Since all Qt operations occur on the _UI thread_, concurrency controls are needed to access and modify shared variables.
+The code logic is sepparated into classes that serve as _Widgets_, and each widget is represented by a `QWidget` _container_. Since all Qt operations occur on the _UI thread_, concurrency controls are needed to access and modify shared variables.
 
 The GUI is designed to send a notification through the base channel once when it starts and once again when it shuts down, but the relay itself is not supposed to shut down under normal circumstances (unless a fatal error appears). As such, the GUI can be closed and opened as many times as you want and the connection will be handled automatically so long as the relay is running.
 
