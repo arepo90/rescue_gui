@@ -478,7 +478,7 @@ The function performs several gradient and interpolation techniques to build a m
 Thermal image filter function (a true filter this time). A video frame, thermal frame, distance and opacity values are passed as arguments.
 
 > [!NOTE]
-> Since the thermal sensor and video sources have different fields of view, as well as being located at different positions, it is not possible to achieve a true overlay of the thermal image over the video image. To achieve an pseudo-overlay between the frames, the `distance` parameter is given in cm to perform trigonometric calculations and build the overlap frame at the specified distance. This and the opacity (`alpha`) settings can be changed in the filter settings dashboard.
+> Since the thermal sensor and video sources have different fields of view and are placed at different positions, it is not possible to get a true overlay of the thermal image over the video image. To achieve a pseudo-overlay between the frames, the `distance` parameter is given in cm to perform trigonometric calculations and build the overlap frame at the specified distance. This and the opacity (`alpha`) settings can be changed in the filter settings dashboard.
 
 1. Calculates the video and thermal sources fields of view and expected physical capture widths in cm.
 2. Calculates the overlap section between the video and thermal frames.
