@@ -30,29 +30,34 @@
 #include <QMainWindow>
 #include <QTextEdit>
 #include <QDateTime>
+#include <QButtonGroup>
+#include <QMessageBox>
 
 // --- c++ ---
+#include <vosk_api.h>
 #include <string>
 #include <portaudio.h>
 #include <opencv2/opencv.hpp>
 #include <opencv2/objdetect.hpp>
 #include <opencv2/dnn.hpp>
-//#include <zbar.h>
+#include <zbar.h>
 #include <opus/opus.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <vector>
 #include <thread>
 #include <atomic>
 #include <mutex>
 #include <cstdint>
-#include <Xinput.h>
-#include <windows.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <nlohmann/json.hpp>
+#include <errno.h>
 #include <iostream>
 #include <random>
 #include <fstream>
 #include <cmath>
-#pragma comment(lib, "ws2_32.lib")
 #define DEG_TO_RAD M_PI / 180.0
 #define MAX_PACKET_SIZE 65536       // 65539 bytes
 
@@ -66,12 +71,14 @@
 #define FRAGMENTATION_FLAG 0x8000   // RTP Header flag
 
 // --- Filter settings ---
-#define CFG_PATH "../../net/yolo.cfg"
-#define WEIGHTS_PATH "../../net/yolo.weights"
-#define LABELS_PATH "../../net/labels.names"
+#define CFG_PATH "../../assets/hazmat_net/yolo.cfg"
+#define WEIGHTS_PATH "../../assets/hazmat_net/yolo.weights"
+#define LABELS_PATH "../../assets/hazmat_net/labels.names"
 #define INPUT_SIZE cv::Size(416, 416)
 #define CONF_THRESH 0.8f
 #define NMS_THRESH 0.4f
+
+#define VOSK_MODEL_PATH "../../assets/vosk_model"
 
 struct RTPHeader {
     uint16_t cc:4;
@@ -123,6 +130,7 @@ private:
     QTextEdit* text_edit;
 };
 
+/*
 class Controller : public QObject{
     Q_OBJECT
 public:
@@ -132,6 +140,7 @@ public:
 private:
     int dead_zone;
 };
+*/
 
 class ModelWidget : public QWidget{
     Q_OBJECT
@@ -142,6 +151,7 @@ public:
     void updateModel(float angleX, float angleY, float angleZ);
     void updateColor(int index, QColor color);
     void destroy(){ delete this; }
+    void resizeLocal(int width, int height){ container->resize(width, height); }
 public slots:
     void updateState(BasePacket model_state);
 private:
@@ -175,13 +185,14 @@ private:
         uint32_t timestamp;
         PayloadType payload_type;
         int port;
+        std::string address;
     };
     Stream* stream;
-    SOCKET send_socket;
-    SOCKET recv_socket;
+    int send_socket;
+    int recv_socket;
     sockaddr_in send_socket_address;
     sockaddr_in recv_socket_address;
-    int socket_address_size = sizeof(send_socket_address);
+    socklen_t socket_address_size = sizeof(send_socket_address);
     DataCallback<float> floatCallback;
     DataCallback<uchar> ucharCallback;
     OpusDecoder* opus_decoder;
@@ -223,11 +234,19 @@ public:
     ~SubsectionWidget();
     void destroy(){ delete this; }
     void setAvailableDevices(int num_cams, std::vector<std::string> cam_names);
-    void setFullScreenMode(bool fullScreen){
+    void setFullScreenMode(bool fullScreen, QSize new_size){
         this->fullScreen = fullScreen;
         QPixmap current = camera_view->pixmap();
-        container->setFixedSize(fullScreen ? QSize(960, 720) : QSize(480, 360));
-        camera_view->setPixmap(current.scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
+        //container->resize(fullScreen ? QSize(960, 720) : QSize(480, 360));
+        //camera_view->setPixmap(current.scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
+        container->resize(new_size);
+        camera_view->setPixmap(current.scaled(new_size, Qt::KeepAspectRatio));
+
+    }
+    void resizeLocal(int width, int height){
+        QPixmap current = camera_view->pixmap();
+        container->resize(width, height);
+        camera_view->setPixmap(current.scaled(width, height, Qt::KeepAspectRatio));
     }
     std::pair<int, QString> getCurrentSelection(){ return std::make_pair(cam_id, camera_dropdown->currentText()); }
     void updateFrame(cv::Mat frame, cv::Mat thermal = cv::Mat(), std::vector<uchar> compressed = {});
@@ -235,7 +254,6 @@ signals:
     void subsectionClicked(SubsectionWidget *widget);
     void selectionChanged();
     void frameReady(QImage image);
-    void destructorCalled(int id);
 protected:
     void mousePressEvent(QMouseEvent *event) override;
 private:
@@ -248,31 +266,43 @@ private:
         cv::Mat thermalAdaptiveInterpolation(cv::Mat frame);
         cv::Mat thermalOverlay(cv::Mat frame, cv::Mat thermal, float distance = 40, float alpha = 0.5);
         cv::Mat placeText(std::string text, cv::Mat frame);
-        cv::Mat detectQR(cv::Mat frame);
-        cv::Mat detectShape(cv::Mat frame);
+        cv::Mat detectQR(cv::Mat frame, int mode = 0);
+        cv::Mat detectShape(cv::Mat frame, int corner = 0, bool mode = false, int threshold = 50, double shape_tolerance = 0.25);
         cv::Mat detectHazmat(cv::Mat frame);
         std::vector<cv::Scalar> colors;
         std::vector<std::string> labels;
         cv::dnn::DetectionModel hazmat_model;
-    };
+    };        //cv::dnn::Net hazmat_model;
+
     struct FilterSettings{
         QWidget* qr_container;
         QWidget* shape_container;
         QWidget* thermal_container;
         QHBoxLayout* qr_layout;
-        QHBoxLayout* shape_layout;
-        QHBoxLayout* thermal_layout;
+        QGridLayout* shape_layout;
+        QGridLayout* thermal_layout;
         QPushButton* qr_button_1;
         QPushButton* qr_button_2;
-        QPushButton* shape_button_1;
-        QPushButton* shape_button_2;
-        QPushButton* shape_button_3;
-        QPushButton* shape_button_4;
+        QButtonGroup* shape_button_group;
+        std::vector<QPushButton*> shape_buttons;
         QSlider* thermal_slider_1;
         QSlider* thermal_slider_2;
+        QSlider* shape_slider_1;
+        QSlider* shape_slider_2;
+        QLabel* shape_label_1;
+        QLabel* shape_label_2;
+        QLabel* shape_label_3;
+        QLabel* shape_label_4;
+        QLabel* shape_label_5;
+        QLabel* thermal_label_1;
+        QLabel* thermal_label_2;
+        QLabel* thermal_label_3;
+        QLabel* thermal_label_4;
         int qr_setting = 0;
         int shape_setting = 0;
         int thermal_distance = 40;
+        int shape_threshold;
+        float shape_tolerance;
         float thermal_alpha = 0.4;
         std::mutex settings_mutex;
     };
@@ -318,10 +348,13 @@ signals:
     void windowClosing();
     void selectionChanged(std::map<int, int> cam_map);
     void buttonChanged(bool is_active);
-    void destructorCalled(int id);
     void modelUpdated(BasePacket model_state);
+    void windowResized(QSize newSize, QSize oldSize);
+    void estopCalled();
+    void restartCalled();
 protected:
-    void closeEvent(QCloseEvent *event) override;
+    void closeEvent(QCloseEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 private:
     std::mutex thermal_mutex;
     std::vector<float> thermal_data;
@@ -331,12 +364,15 @@ private:
     QGridLayout* dashboard_layout;
     QVBoxLayout* right_layout;
     QWidget* left_container;
+    QWidget* dashboard_container;
     QLabel* sensor_label;
     QLabel* gas_label;
     QLabel* speech_label;
     QLabel* magnetometer_label;
     QPushButton* microphone_button;
     QPushButton* clear_button;
+    QPushButton* estop_button;
+    QPushButton* restart_button;
     SubsectionWidget* fullscreen_widget = nullptr;
     std::vector<SubsectionWidget*> subsections;
     bool is_fullscreen;
@@ -356,14 +392,19 @@ private:
     PaError PaErrorCallback(const char *errorText, PaHostApiTypeId hostApiType, PaHostErrorInfo* hostErrorInfo){ return 0; }
     SocketStruct* base_channel;
     SocketStruct* audio_channel;
-    SocketStruct* vosk_channel;
     std::vector<SocketStruct*> video_channels;
     std::atomic<bool> is_audio_active;
     int port;
     int pa_error;
     MainWindow* window;
     OpusDecoder* opus_decoder;
+    VoskModel* vosk_model = nullptr;
+    VoskRecognizer* vosk_recognizer = nullptr;
+    std::queue<std::vector<int16_t>> audio_queue;
+    std::thread vosk_thread;
+    std::mutex vosk_mutex;
     PaStream* stream;
+    std::string vocab_json;
 };
 
 #endif
