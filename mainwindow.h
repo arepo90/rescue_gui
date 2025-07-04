@@ -26,14 +26,16 @@
 #include <QStandardItemModel>
 #include <QTimer>
 #include <QDirectionalLight>
-#include <QtLogging>
+//#include <QtLogging>
 #include <QMainWindow>
 #include <QTextEdit>
 #include <QDateTime>
 #include <QButtonGroup>
 #include <QMessageBox>
+#include <QPainter>
 
 // --- c++ ---
+#include <SDL2/SDL.h>
 #include <vosk_api.h>
 #include <string>
 #include <portaudio.h>
@@ -66,19 +68,25 @@
 #define SAMPLE_RATE 16000           // 16 kHz
 // "192.168.50.134" eth
 // "192.168.50.249" wifi
-#define CLIENT_IP "127.0.0.1"
+#define CLIENT_IP "192.168.0.237"
 #define MAX_UDP_PACKET_SIZE 65507   // 65507 bytes
 #define FRAGMENTATION_FLAG 0x8000   // RTP Header flag
 
 // --- Filter settings ---
+#define THERMAL_X_DIFF 7.0f
+#define THERMAL_Y_DIFF 6.0f
 #define CFG_PATH "../../assets/hazmat_net/yolo.cfg"
 #define WEIGHTS_PATH "../../assets/hazmat_net/yolo.weights"
 #define LABELS_PATH "../../assets/hazmat_net/labels.names"
-#define INPUT_SIZE cv::Size(416, 416)
 #define CONF_THRESH 0.8f
 #define NMS_THRESH 0.4f
+const cv::Size INPUT_SIZE = cv::Size(416, 416);
 
+// --- Vosk settings ---
 #define VOSK_MODEL_PATH "../../assets/vosk_model"
+const std::vector<std::string> VOSK_VOCAB = {"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"};
+const std::pair<float, float> THERMAL_FOV{60.0, 60.0};
+const std::pair<float, float> CAM_FOV{80.0, 45.0};
 
 struct RTPHeader {
     uint16_t cc:4;
@@ -118,6 +126,8 @@ enum class PayloadType : uint8_t{
 
 // --- Helper func ---
 float nMap(float n, float minIn, float maxIn, float minOut, float maxOut);
+std::string parseJSON(std::string json, std::string keyword);
+cv::Mat fisheyeTransform(cv::Mat frame);
 
 // --- Class declarations ---
 
@@ -130,17 +140,17 @@ private:
     QTextEdit* text_edit;
 };
 
-/*
 class Controller : public QObject{
     Q_OBJECT
 public:
     Controller(int dead_zone = 1000);
     ~Controller();
+    void destroy(){ delete this; }
     std::vector<int> readState();
 private:
+    SDL_GameController* controller = nullptr;
     int dead_zone;
 };
-*/
 
 class ModelWidget : public QWidget{
     Q_OBJECT
@@ -214,17 +224,39 @@ struct SocketStruct{
     SocketStruct(SocketStruct&& other) noexcept
         : recv_thread(std::move(other.recv_thread)),
         send_thread(std::move(other.send_thread)),
-        target_socket(std::move(other.target_socket)){}
+        target_socket(std::move(other.target_socket)),
+        int_data(std::move(other.int_data)){}
     SocketStruct& operator=(SocketStruct&& other) noexcept {
         if(this != &other){
             recv_thread = std::move(other.recv_thread);
             send_thread = std::move(other.send_thread);
             target_socket = std::move(other.target_socket);
+            int_data = std::move(other.int_data);
         }
         return *this;
     }
     SocketStruct(const SocketStruct&) = delete;
     SocketStruct& operator=(const SocketStruct&) = delete;
+};
+
+struct CamStruct{
+    cv::VideoCapture* cap;
+    std::thread cam_thread;
+    std::atomic<bool> is_active;
+    std::atomic<bool> is_send_running;
+    CamStruct() : cap(nullptr) {}
+    CamStruct(CamStruct&& other) noexcept
+        : cam_thread(std::move(other.cam_thread)),
+        cap(std::move(other.cap)){}
+    CamStruct& operator=(CamStruct&& other) noexcept {
+        if(this != &other){
+            cam_thread = std::move(other.cam_thread);
+            cap = std::move(other.cap);
+        }
+        return *this;
+    }
+    CamStruct(const CamStruct&) = delete;
+    CamStruct& operator=(const CamStruct&) = delete;
 };
 
 class SubsectionWidget : public QWidget{
@@ -239,6 +271,7 @@ public:
         QPixmap current = camera_view->pixmap();
         //container->resize(fullScreen ? QSize(960, 720) : QSize(480, 360));
         //camera_view->setPixmap(current.scaled((fullScreen ? QSize(960, 720) : QSize(480, 360)), Qt::KeepAspectRatio));
+        current_size = new_size;
         container->resize(new_size);
         camera_view->setPixmap(current.scaled(new_size, Qt::KeepAspectRatio));
 
@@ -254,10 +287,12 @@ signals:
     void subsectionClicked(SubsectionWidget *widget);
     void selectionChanged();
     void frameReady(QImage image);
+    void resolutionChanged(int id, int width, int height);
 protected:
     void mousePressEvent(QMouseEvent *event) override;
 private:
     struct Filters{
+        Filters() = default;
         std::atomic<bool> none;
         std::atomic<bool> is_qr_active;
         std::atomic<bool> is_hazmat_active;
@@ -272,7 +307,7 @@ private:
         std::vector<cv::Scalar> colors;
         std::vector<std::string> labels;
         cv::dnn::DetectionModel hazmat_model;
-    };        //cv::dnn::Net hazmat_model;
+    };
 
     struct FilterSettings{
         QWidget* qr_container;
@@ -280,6 +315,7 @@ private:
         QWidget* thermal_container;
         QHBoxLayout* qr_layout;
         QGridLayout* shape_layout;
+        QGridLayout* shape_button_layout;
         QGridLayout* thermal_layout;
         QPushButton* qr_button_1;
         QPushButton* qr_button_2;
@@ -301,16 +337,18 @@ private:
         int qr_setting = 0;
         int shape_setting = 0;
         int thermal_distance = 40;
-        int shape_threshold;
-        float shape_tolerance;
+        int shape_threshold = 50;
+        float shape_tolerance = 0.25;
         float thermal_alpha = 0.4;
         std::mutex settings_mutex;
     };
 
+    QSize current_size;
     Filters filters;
     FilterSettings filter_settings;
     QComboBox* camera_dropdown;
     QComboBox* filter_dropdown;
+    QComboBox* settings_dropdown;
     int cam_id;
     int id;
     int num_cams;
@@ -340,7 +378,7 @@ class MainWindow : public QWidget{
 public:
     explicit MainWindow(QWidget *parent = nullptr);
     void updateState(std::vector<float> data);
-    void updateFrame(int id, std::vector<unsigned char> data);
+    void updateFrame(int id, std::vector<unsigned char> data, bool bypass = false);
     void updateThermal(std::vector<float> data);
     void setCamPorts(int num_cams, std::vector<std::string> cam_names);
     template<typename T> void updateDashbord(int index, T data);
@@ -352,6 +390,8 @@ signals:
     void windowResized(QSize newSize, QSize oldSize);
     void estopCalled();
     void restartCalled();
+    void controllerCalled();
+    void resolutionChanged(int id, int width, int height);
 protected:
     void closeEvent(QCloseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
@@ -360,8 +400,10 @@ private:
     std::vector<float> thermal_data;
     QHBoxLayout* main_layout;
     QHBoxLayout* button_layout;
+    QHBoxLayout* button_layout_2;
     QGridLayout* left_layout;
     QGridLayout* dashboard_layout;
+    QGridLayout* settings_layout;
     QVBoxLayout* right_layout;
     QWidget* left_container;
     QWidget* dashboard_container;
@@ -369,10 +411,17 @@ private:
     QLabel* gas_label;
     QLabel* speech_label;
     QLabel* magnetometer_label;
+    QLabel* settings_label_1;
+    QLabel* settings_label_2;
+    QLabel* settings_label_3;
+    QLabel* settings_label_4;
+    QSlider* settings_slider_1;
+    QSlider* settings_slider_2;
     QPushButton* microphone_button;
     QPushButton* clear_button;
     QPushButton* estop_button;
     QPushButton* restart_button;
+    QPushButton* controller_button;
     SubsectionWidget* fullscreen_widget = nullptr;
     std::vector<SubsectionWidget*> subsections;
     bool is_fullscreen;
@@ -389,9 +438,14 @@ public:
     void init();
     void destroy(){ delete this; }
 private:
+    int num_cams;
+    int local_cams;
+    Controller* controller;
+    std::vector<CamStruct*> cams;
     PaError PaErrorCallback(const char *errorText, PaHostApiTypeId hostApiType, PaHostErrorInfo* hostErrorInfo){ return 0; }
     SocketStruct* base_channel;
     SocketStruct* audio_channel;
+    SocketStruct* controller_channel;
     std::vector<SocketStruct*> video_channels;
     std::atomic<bool> is_audio_active;
     int port;
@@ -403,8 +457,10 @@ private:
     std::queue<std::vector<int16_t>> audio_queue;
     std::thread vosk_thread;
     std::mutex vosk_mutex;
+    std::mutex video_mutex;
     PaStream* stream;
     std::string vocab_json;
+    std::vector<int> local_cam_ports;
 };
 
 #endif

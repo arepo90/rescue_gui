@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=test
+Exec=test
+Icon=test
+Comment=Your app description
+Categories=Utility;

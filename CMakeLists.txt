@@ -56,6 +56,7 @@ elseif(UNIX)
     pkg_check_modules(OPUS REQUIRED opus)
     pkg_check_modules(PORTAUDIO REQUIRED portaudio-2.0)
     pkg_check_modules(ZBAR REQUIRED zbar)
+    pkg_check_modules(SDL2 REQUIRED sdl2)
 
     set(VOSK_ROOT "/home/arepo/vosk/vosk-linux-x86_64-0.3.45" CACHE PATH "Path to Vosk installation directory")
     add_library(Vosk::vosk SHARED IMPORTED)
@@ -124,12 +125,14 @@ elseif(UNIX)
         ${CMAKE_DL_LIBS}
         pthread
         nlohmann_json::nlohmann_json
+        ${SDL2_LIBRARIES}
     )
     target_include_directories(test PRIVATE
         ${OpenCV_INCLUDE_DIRS}
         ${OPUS_INCLUDE_DIRS}
         ${PORTAUDIO_INCLUDE_DIRS}
         ${ZBAR_INCLUDE_DIRS}
+        ${SDL2_INCLUDE_DIRS}
     )
     set_target_properties(test PROPERTIES
         INSTALL_RPATH "${VOSK_ROOT}"
@@ -140,7 +143,7 @@ endif()
 include(GNUInstallDirs)
 install(TARGETS test
     BUNDLE  DESTINATION .
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}|
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 

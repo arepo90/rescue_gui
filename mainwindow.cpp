@@ -1,56 +1,112 @@
 #include "mainwindow.h"
 
-std::pair<float, float> THERMAL_FOV{60.0, 60.0};
-std::pair<float, float> CAM_FOV{80.0, 45.0};
-
 // --- Helper funcs ---
 float nMap(float n, float minIn, float maxIn, float minOut, float maxOut){
     return (n - minIn) / (maxIn - minIn) * (maxOut - minOut) + minOut;
 }
 
-/*
-// --- Controller (xbox) WIP ---
+cv::Mat fisheyeTransform(cv::Mat frame){
+    int w = frame.cols;
+    int h = frame.rows;
+
+    // intrinsics
+    cv::Matx33f K(w / 2.0f, 0, w / 2.0f,
+                  0, h / 2.0f, h / 2.0f,
+                  0, 0, 1);
+    // k1, k2, k3, k4
+    cv::Vec4f D(0, 0, 0.0, 0.0);
+
+    cv::Mat map_1, map_2, output;
+    cv::Matx33f new_k;
+    cv::fisheye::estimateNewCameraMatrixForUndistortRectify(K, D, frame.size(), cv::Matx33f::eye(), new_k, 0.0f);
+    cv::fisheye::initUndistortRectifyMap(K, D, cv::Matx33f::eye(), new_k, frame.size(), CV_16SC2, map_1, map_2);
+    cv::remap(frame, output, map_1, map_2, cv::INTER_LINEAR);
+
+    return output;
+}
+
+std::string parseJSON(std::string json, std::string keyword){
+    if(json.find(keyword) == std::string::npos) return "";
+    size_t start = json.find(keyword);
+    start = json.find(":", start);
+    start = json.find("\"", start);
+    start++;
+    size_t end = json.find("\"", start);
+    std::string text = json.substr(start, end - start);
+    return text;
+}
+
+// --- Controller (xbox) ---
 Controller::Controller(int dead_zone){
     this->dead_zone = dead_zone;
+    if(SDL_Init(SDL_INIT_GAMECONTROLLER) < 0){
+        qCritical() << "SDL could not initialize: " << SDL_GetError();
+        return;
+    }
+    if (SDL_NumJoysticks() < 1) {
+        qCritical() << "No controllers connected!";
+        return;
+    }
+    controller = SDL_GameControllerOpen(0);
+    qInfo() << "Controller connected: " << SDL_GameControllerName(controller);
 }
 
 Controller::~Controller(){
-    return; // bruh
+    qInfo() << "Closing controller...";
+    if(controller){
+        SDL_GameControllerClose(controller);
+    }
+    SDL_Quit();
+    controller = nullptr;
 }
 
 std::vector<int> Controller::readState(){
-    XINPUT_STATE state;
-    XInputGetState(0, &state);
-    std::vector<int> states;
-    states.push_back(state.Gamepad.sThumbLX);
-    states.push_back(state.Gamepad.sThumbLY);
-    states.push_back(state.Gamepad.sThumbRX);
-    states.push_back(state.Gamepad.sThumbRY);
-    for(int i = 0; i < states.size(); i++){
-        if(std::abs(states[i]) < dead_zone)
-            states[i] = 0;
-        else
-            states[i] = static_cast<int>(nMap(states[i], -32768, 32768, -255, 255));
+    std::vector<int> states(20, 0);
+    Sint16 axis;
+    if(!controller) return states;
+
+    SDL_Event event;
+    while(SDL_PollEvent(&event)){
+        if(event.type == SDL_QUIT) return states;
     }
-    states.push_back(state.Gamepad.bLeftTrigger);
-    states.push_back(state.Gamepad.bRightTrigger);
-    states.push_back((state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_UP) ? 1 : 0);
-    states.push_back((state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN) ? 1 : 0);
-    states.push_back((state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT) ? 1 : 0);
-    states.push_back((state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : 0);
-    states.push_back((state.Gamepad.wButtons & XINPUT_GAMEPAD_START) ? 1 : 0);
-    states.push_back((state.Gamepad.wButtons & XINPUT_GAMEPAD_BACK) ? 1 : 0);
-    states.push_back((state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB) ? 1 : 0);
-    states.push_back((state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) ? 1 : 0);
-    states.push_back((state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) ? 1 : 0);
-    states.push_back((state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) ? 1 : 0);
-    states.push_back((state.Gamepad.wButtons & XINPUT_GAMEPAD_A) ? 1 : 0);
-    states.push_back((state.Gamepad.wButtons & XINPUT_GAMEPAD_B) ? 1 : 0);
-    states.push_back((state.Gamepad.wButtons & XINPUT_GAMEPAD_X) ? 1 : 0);
-    states.push_back((state.Gamepad.wButtons & XINPUT_GAMEPAD_Y) ? 1 : 0);
+
+    // Left X
+    axis = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX);
+    states[0] = (std::abs(axis) < dead_zone) ? 0 : static_cast<int>(nMap(axis, -32768, 32767, -255, 255));
+    // Left Y
+    axis = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY);
+    states[1] = (std::abs(axis) < dead_zone) ? 0 : -static_cast<int>(nMap(axis, -32768, 32767, -255, 255));
+
+    // Right X
+    axis = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTX);
+    states[2] = (std::abs(axis) < dead_zone) ? 0 : static_cast<int>(nMap(axis, -32768, 32767, -255, 255));
+    // Right Y
+    axis = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTY);
+    states[3] = (std::abs(axis) < dead_zone) ? 0 : -static_cast<int>(nMap(axis, -32768, 32767, -255, 255));
+
+    // Triggers
+    states[4] = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) / 128;
+    states[5] = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) / 128;
+
+    // Buttons
+    states[6] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_UP) ? 1 : 0;
+    states[7] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_DOWN) ? 1 : 0;
+    states[8] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_LEFT) ? 1 : 0;
+    states[9] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) ? 1 : 0;
+    states[10] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_START) ? 1 : 0;
+    states[11] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_BACK) ? 1 : 0;
+    states[12] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_LEFTSTICK) ? 1 : 0;
+    states[13] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_RIGHTSTICK) ? 1 : 0;
+    states[14] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) ? 1 : 0;
+    states[15] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) ? 1 : 0;
+    states[16] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A) ? 1 : 0;
+    states[17] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_B) ? 1 : 0;
+    states[18] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_X) ? 1 : 0;
+    states[19] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_Y) ? 1 : 0;
+
     return states;
 }
-*/
+
 
 // --- 3D viewer ---
 ModelWidget::ModelWidget(QWidget *parent) : QWidget(parent){
@@ -58,18 +114,18 @@ ModelWidget::ModelWidget(QWidget *parent) : QWidget(parent){
     viewport = new Qt3DExtras::Qt3DWindow();
     viewport->defaultFrameGraph()->setClearColor(QColor("#202020"));
     container = QWidget::createWindowContainer(viewport, this);
-    //container->setMinimumSize(QSize(320, 360));
-    this->resize(QSize(320, 360));
-    container->resize(QSize(320, 360));
+    //container->setMinimumSize(QSize(480, 360));
     this->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     container->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    //container->resize(QSize(600, 400));
+    //this->resize(QSize(600, 400));
     loadModels();
     Qt3DRender::QCamera *camera = viewport->camera();
     camera->lens()->setPerspectiveProjection(45.0f, 16.0f/9.0f, 0.1f, 1000.0f);
     camera->setPosition(QVector3D(1.5f, 1.5f, 1.5f));
     camera->setViewCenter(QVector3D(0.0f, 0.0f, 0.0f));
     camera->setUpVector(QVector3D(0.0f, 1.0f, 0.0f));
-    Qt3DExtras::QOrbitCameraController *cam_controller = new Qt3DExtras::QOrbitCameraController(root);
+    Qt3DExtras::QOrbitCameraController* cam_controller = new Qt3DExtras::QOrbitCameraController(root);
     cam_controller->setLinearSpeed(10.0f);
     cam_controller->setLookSpeed(180.0f);
     cam_controller->setCamera(camera);
@@ -86,7 +142,7 @@ ModelWidget::~ModelWidget(){
 
 void ModelWidget::updateState(BasePacket model_state){
     if(root == nullptr){
-        qWarning() << "MAINWINDOW MODEL UPDATE | Invalid model: uninitialized pointer";
+        qWarning() << "ModelWidget::updateState | Invalid model: uninitialized pointer";
         return;
     }
 
@@ -224,23 +280,18 @@ void ModelWidget::loadModels(){
         axis_entity->addComponent(transform);
         axis_entity->addComponent(axis_material);
     }
+    /*
     Qt3DRender::QMesh *mesh = new Qt3DRender::QMesh(root);
-    // Replace with your OBJ file path
     mesh->setSource(QUrl::fromLocalFile("body_nobands.obj"));
-
-    // Create material component
     Qt3DExtras::QPhongMaterial *material = new Qt3DExtras::QPhongMaterial(root);
     material->setDiffuse(QColor(QRgb(0x665423)));
-
-    // Create transform component
     Qt3DCore::QTransform *transform = new Qt3DCore::QTransform;
     transform->setScale(1.0f);
-
-    // Create entity and add components
     Qt3DCore::QEntity *modelEntity = new Qt3DCore::QEntity(root);
     modelEntity->addComponent(mesh);
     modelEntity->addComponent(material);
     modelEntity->addComponent(transform);
+    */
 }
 
 void ModelWidget::updateModel(float angleX, float angleY, float angleZ){
@@ -249,7 +300,7 @@ void ModelWidget::updateModel(float angleX, float angleY, float angleZ){
 
 void ModelWidget::updatePivot(int index, int axis, float angle){
     if(index >= pivots.size()){
-        qCritical() << "MODEL UPDATE PIVOT | Invalid pivot index: out of bounds";
+        qCritical() << "ModelWidget::updatePivot | Invalid pivot index: out of bounds";
         return;
     }
     if(axis == 0)
@@ -259,12 +310,12 @@ void ModelWidget::updatePivot(int index, int axis, float angle){
     else if(axis == 2)
         pivots[index]->setRotation(QQuaternion::fromEulerAngles(pivots[index]->rotationX(), pivots[index]->rotationY(), angle));
     else
-        qCritical() << "MODEL UPDATE PIVOT | Invalid pivot axis: out of bounds";
+        qCritical() << "ModelWidget::updatePivot | Invalid pivot axis: out of bounds";
 }
 
 void ModelWidget::updateColor(int index, QColor color){
     if(index >= band_colors.size()){
-        qCritical() << "MODEL UPDATE COLOR | Invalid part index: out of bounds";
+        qCritical() << "ModelWidget::updateColor | Invalid part index: out of bounds";
         return;
     }
     band_colors[index]->setDiffuse(color);
@@ -275,8 +326,8 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     this->id = id;
     cam_id = -1;
     container = new QWidget(this);
-    //container->setFixedSize(480, 360);
     container->resize(480, 360);
+    current_size = QSize(480, 360);
     layout = new QVBoxLayout();
     settings = new QVBoxLayout();
     dropdowns = new QHBoxLayout();
@@ -288,8 +339,12 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     filter_dropdown = new QComboBox();
     filter_dropdown->addItems({ "No filter", "QR Code", "Hazmat", "Shape", "Thermal" });
     filter_dropdown->setEnabled(false);
+    settings_dropdown = new QComboBox();
+    settings_dropdown->addItems({ "1280x720", "1920x1080", "1280x1280 *", "720x720 *" });
+    settings_dropdown->setEnabled(false);
     dropdowns->addWidget(camera_dropdown);
     dropdowns->addWidget(filter_dropdown);
+    dropdowns->addWidget(settings_dropdown);
     layout->addLayout(dropdowns);
     layout->addWidget(camera_view);
     layout->addLayout(settings);
@@ -310,6 +365,7 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     filter_settings.qr_layout = new QHBoxLayout();
     filter_settings.shape_layout = new QGridLayout();
     filter_settings.thermal_layout = new QGridLayout();
+    filter_settings.shape_button_layout = new QGridLayout();
     filter_settings.qr_button_1 = new QPushButton("OpenCV");
     filter_settings.qr_button_2 = new QPushButton("ZBar");
     filter_settings.thermal_slider_1 = new QSlider(Qt::Horizontal);
@@ -319,9 +375,9 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     filter_settings.shape_button_group = new QButtonGroup();
     filter_settings.shape_label_1 = new QLabel(" Corner ");
     filter_settings.shape_label_2 = new QLabel(" Threshold ");
-    filter_settings.shape_label_3 = new QLabel(" 50 ");
-    filter_settings.shape_label_4 = new QLabel("  ");
-    filter_settings.shape_label_5 = new QLabel(" 50 ");
+    filter_settings.shape_label_3 = new QLabel(" Tolerance ");
+    filter_settings.shape_label_4 = new QLabel("  50 ");
+    filter_settings.shape_label_5 = new QLabel(" 0.25 ");
     filter_settings.thermal_label_1 = new QLabel(" Distance (cm) ");
     filter_settings.thermal_label_2 = new QLabel(" Opacity ");
     filter_settings.thermal_label_3 = new QLabel(" 50 ");
@@ -339,7 +395,7 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
             margin: 0px;
             border-top-left-radius: 5px;
             border-bottom-left-radius: 5px;
-            border: 2px solid white;
+            border: 1px solid white;
         }
         QPushButton:checked {
             background-color: gray;
@@ -358,10 +414,8 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
             background-color: gray;
         }
     )");
-    filter_settings.qr_button_1->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     filter_settings.qr_button_1->setCheckable(true);
     filter_settings.qr_button_1->setChecked(true);
-    filter_settings.qr_button_2->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     filter_settings.qr_button_2->setCheckable(true);
     filter_settings.qr_layout->setSpacing(0);
     filter_settings.qr_layout->setContentsMargins(5, 5, 5, 5);
@@ -390,28 +444,31 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
                  i == 3 ? "border-bottom-right-radius: 5px;" : "")
         )))));
         filter_settings.shape_button_group->addButton(filter_settings.shape_buttons[i], i);
-        filter_settings.shape_layout->addWidget(filter_settings.shape_buttons[i], i/2, 1 + i%2);
+        filter_settings.shape_button_layout->addWidget(filter_settings.shape_buttons[i], i/2, 1 + i%2);
     }
     filter_settings.shape_buttons[0]->setChecked(true);
     filter_settings.shape_slider_1->setRange(0, 255);
     filter_settings.shape_slider_1->setValue(50);
     filter_settings.shape_slider_1->setTickInterval(5);
-    filter_settings.shape_slider_1->setRange(0, 20);
-    filter_settings.shape_slider_1->setValue(5);
-    filter_settings.shape_slider_1->setTickInterval(1);
-    filter_settings.shape_layout->addWidget(filter_settings.shape_label_1, 0, 0, 2, 1);
-    filter_settings.shape_layout->addWidget(filter_settings.shape_label_2, 2, 0);
-    filter_settings.shape_layout->addWidget(filter_settings.shape_slider_1, 2, 1);
-    filter_settings.shape_layout->addWidget(filter_settings.shape_label_3, 2, 1);
-    filter_settings.shape_layout->addWidget(filter_settings.shape_label_4, 3, 0);
-    filter_settings.shape_layout->addWidget(filter_settings.shape_slider_1, 3, 1);
-    filter_settings.shape_layout->addWidget(filter_settings.shape_label_5, 3, 2);
-    filter_settings.shape_layout->setSpacing(0);
+    filter_settings.shape_slider_2->setRange(0, 20);
+    filter_settings.shape_slider_2->setValue(5);
+    filter_settings.shape_slider_2->setTickInterval(1);
+    filter_settings.shape_layout->addLayout(filter_settings.shape_button_layout, 0, 1, 1, 2);
+    filter_settings.shape_layout->addWidget(filter_settings.shape_label_1, 0, 0);
+    filter_settings.shape_layout->addWidget(filter_settings.shape_label_2, 1, 0);
+    filter_settings.shape_layout->addWidget(filter_settings.shape_slider_1, 1, 1);
+    filter_settings.shape_layout->addWidget(filter_settings.shape_label_4, 1, 2);
+    filter_settings.shape_layout->addWidget(filter_settings.shape_label_3, 2, 0);
+    filter_settings.shape_layout->addWidget(filter_settings.shape_slider_2, 2, 1);
+    filter_settings.shape_layout->addWidget(filter_settings.shape_label_5, 2, 2);
+    filter_settings.shape_button_layout->setSpacing(0);
+    filter_settings.shape_button_layout->setContentsMargins(0, 0, 0, 0);
+    filter_settings.shape_layout->setSpacing(5);
     filter_settings.shape_layout->setContentsMargins(5, 5, 5, 5);
     filter_settings.shape_container->setLayout(filter_settings.shape_layout);
     filter_settings.shape_container->hide();
 
-    filter_settings.thermal_slider_1->setRange(1, 100);
+    filter_settings.thermal_slider_1->setRange(0, 100);
     filter_settings.thermal_slider_1->setValue(50);
     filter_settings.thermal_slider_1->setTickInterval(5);
     filter_settings.thermal_slider_2->setRange(0, 10);
@@ -423,7 +480,7 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     filter_settings.thermal_layout->addWidget(filter_settings.thermal_label_2, 1, 1);
     filter_settings.thermal_layout->addWidget(filter_settings.thermal_slider_2, 1, 2);
     filter_settings.thermal_layout->addWidget(filter_settings.thermal_label_4, 1, 3);
-    filter_settings.thermal_layout->setSpacing(0);
+    filter_settings.thermal_layout->setSpacing(5);
     filter_settings.thermal_layout->setContentsMargins(5, 5, 5, 5);
     filter_settings.thermal_container->setLayout(filter_settings.thermal_layout);
     filter_settings.thermal_container->hide();
@@ -431,12 +488,20 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     connect(filter_settings.qr_button_1, &QPushButton::clicked, this, [this](){
         if(filter_settings.qr_button_2->isChecked())
             filter_settings.qr_button_2->setChecked(false);
+        if(!filter_settings.qr_button_1->isChecked()){
+            filter_settings.qr_button_1->setChecked(true);
+            return;
+        }
         std::lock_guard<std::mutex> lock(filter_settings.settings_mutex);
         filter_settings.qr_setting = 0;
     });
     connect(filter_settings.qr_button_2, &QPushButton::clicked, this, [this](){
         if(filter_settings.qr_button_1->isChecked())
             filter_settings.qr_button_1->setChecked(false);
+        if(!filter_settings.qr_button_2->isChecked()){
+            filter_settings.qr_button_2->setChecked(true);
+            return;
+        }
         std::lock_guard<std::mutex> lock(filter_settings.settings_mutex);
         filter_settings.qr_setting = 1;
     });
@@ -450,9 +515,9 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
         filter_settings.shape_threshold = value;
     });
     connect(filter_settings.shape_slider_2, &QSlider::valueChanged, this, [this](int value){
-        filter_settings.shape_label_5->setText(QString(" %1 ").arg(value));
+        filter_settings.shape_label_5->setText(QString(" %1 ").arg(static_cast<float>(value)/20.0));
         std::lock_guard<std::mutex> lock(filter_settings.settings_mutex);
-        filter_settings.shape_threshold = static_cast<float>(value) / 20.0;
+        filter_settings.shape_tolerance = static_cast<float>(value) / 20.0;
     });
     connect(filter_settings.thermal_slider_1, &QSlider::valueChanged, this, [this](int value){
         filter_settings.thermal_label_3->setText(QString(" %1 ").arg(value));
@@ -460,7 +525,7 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
         filter_settings.thermal_distance = value;
     });
     connect(filter_settings.thermal_slider_2, &QSlider::valueChanged, this, [this](int value){
-        filter_settings.thermal_label_4->setText(QString(" %1 ").arg((float)value/10.0));
+        filter_settings.thermal_label_4->setText(QString(" %1 ").arg(static_cast<float>(value)/10.0));
         std::lock_guard<std::mutex> lock(filter_settings.settings_mutex);
         filter_settings.thermal_alpha = static_cast<float>(value) / 10.0;
     });
@@ -483,7 +548,7 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
                 thermal = thermal_frame.clone();
             }
             if(frame.empty()){
-                qWarning() << "Empty frame on cv";
+                qWarning() << "SubsectionWidget" << id << "::cv_thread | Invalid frame: empty cv::Mat passed to filters";
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 continue;
             }
@@ -498,12 +563,15 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
             else if(filters.is_hazmat_active.load())
                 frame = filters.detectHazmat(frame);
             else if(filters.is_shape_active.load()){
-                int corner = 0;
+                int corner = 0, threshold = 0, tolerance = 0;
                 {
                     std::lock_guard<std::mutex> lock(filter_settings.settings_mutex);
                     corner = filter_settings.shape_setting;
+                    threshold = filter_settings.shape_threshold;
+                    tolerance = filter_settings.shape_tolerance;
+
                 }
-                frame = filters.detectShape(frame, corner);
+                frame = filters.detectShape(frame, corner, false, threshold, tolerance);
             }
             else if(filters.is_thermal_active.load()){
                 int distance = 0;
@@ -518,7 +586,7 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
                 //frame = process_camera_frames(frame, thermal, 40, 0.5);
             }
             else{
-                qWarning() << "SUBSECTION " << id << " CV LOOP | Invalid marker: no active filter";
+                qWarning() << "SubsectionWidget" << id << "::cv_thread | Invalid filter: no filter flag active";
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 continue;
             }
@@ -530,14 +598,31 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     });
     connect(camera_dropdown,  &QComboBox::currentIndexChanged, this, [this](int index){
         cam_id = index - 1;
+        if(index != 0){
+        qDebug() << "calling resolution on " << cam_id;
+        emit resolutionChanged(cam_id, 1280, 720);
+        }
+        qDebug() << "before emit";
         emit selectionChanged();
+        filter_dropdown->setCurrentIndex(0);
+        settings_dropdown->blockSignals(true);
+        settings_dropdown->setCurrentIndex(0);
+        settings_dropdown->blockSignals(false);
         if(index == 0){
-            filter_dropdown->setCurrentIndex(0);
+            qDebug() << "before enabled";
             filter_dropdown->setEnabled(false);
+            settings_dropdown->setEnabled(false);
+            if(!fullScreen)
+                current_size = QSize(480, 360);
+            else
+                current_size = QSize(960, 720);
+            qDebug() << "before update";
             updateFrame(cv::imread("../../assets/imgs/404.png"));
         }
-        else
+        else{
             filter_dropdown->setEnabled(true);
+            settings_dropdown->setEnabled(true);
+        }
     });
     connect(filter_dropdown, &QComboBox::currentIndexChanged, this, [this](int index){
         filters.none.store(index == 0);
@@ -572,21 +657,59 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
             filter_settings.thermal_container->hide();
         }
     });
+    connect(settings_dropdown, &QComboBox::currentIndexChanged, this, [this](int index){
+        qDebug() << "settings changed";
+        int width, height;
+        switch(index){
+            case 0:
+            default:
+                width = 1280;
+                height = 720;
+                break;
+            case 1:
+                width = 1920;
+                height = 1080;
+                break;
+            case 2:
+                width = 1280;
+                height = 1280;
+                break;
+            case 3:
+                width = 720;
+                height = 720;
+                break;
+        }
+        if(width == height){
+            if(!fullScreen)
+                current_size = QSize(480, 480);
+            else
+                current_size = QSize(960, 960);
+            container->resize(current_size);
+        }
+        else{
+            if(!fullScreen)
+                current_size = QSize(480, 360);
+            else
+                current_size = QSize(960, 720);
+            container->resize(current_size);
+        }
+        emit resolutionChanged(camera_dropdown->currentIndex()-1, width, height);
+    });
 
     camera_view->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     camera_view->setPixmap(QPixmap("../../assets/imgs/404.png").scaled(QSize(480, 270)));
     connect(this, &SubsectionWidget::frameReady, this, [this, id](QImage image){
         if(!image.isNull()){
-            //camera_view->setPixmap(QPixmap::fromImage(qt_frame).scaled((this->fullScreen ? QSize(960, 720) : QSize(480, 270)), Qt::KeepAspectRatio));
-            camera_view->setPixmap(QPixmap::fromImage(qt_frame).scaled(container->size(), Qt::KeepAspectRatio));
+            //camera_view->setPixmap(QPixmap::fromImage(qt_frame).scaled(container->size(), Qt::KeepAspectRatio));
+            camera_view->setPixmap(QPixmap::fromImage(qt_frame).scaled(current_size, Qt::KeepAspectRatio));
         }
         else
-            qCritical() << "SUBSECTION " << id << " FRAME READY | Invalid image: frame is null";
+            qCritical() << "SubsectionWidget" << id << "::frameReady | Invalid frame: null QImage";
     });
 
     std::ifstream file(LABELS_PATH);
     if(!file.is_open()) {
-        qCritical() << "Error opening labels file";
+        qCritical() << "SubsectionWidget" << id << "::constructor | Invalid hazmat labels: file can't be opened";
         return;
     }
     std::string line;
@@ -610,6 +733,33 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
 
 // --- Visual filters ---
 cv::Mat SubsectionWidget::Filters::thermalAdaptiveInterpolation(cv::Mat frame){
+    cv::resize(frame, frame, cv::Size(64, 64), 0, 0, cv::INTER_CUBIC);
+    double min_val, max_val;
+    cv::minMaxLoc(frame, &min_val, &max_val);
+    cv::Mat grad_x, grad_y, grad_mag;
+    cv::Sobel(frame, grad_x, CV_32F, 1, 0, 3);
+    cv::Sobel(frame, grad_y, CV_32F, 0, 1, 3);
+    cv::magnitude(grad_x, grad_y, grad_mag);
+    cv::Mat up_gradient;
+    cv::resize(grad_mag, up_gradient, cv::Size(64, 64), 0, 0, cv::INTER_LINEAR);
+    cv::normalize(up_gradient, up_gradient, 0, 1, cv::NORM_MINMAX);
+    cv::Mat enhanced = frame.clone();
+    for(int y = 0; y < enhanced.rows; y++){
+        for(int x = 0; x < enhanced.cols; x++){
+            enhanced.at<float>(y, x) = frame.at<float>(y, x) * (1.0f + up_gradient.at<float>(y, x) * 0.3f);
+        }
+    }
+    cv::normalize(enhanced, enhanced, min_val, max_val, cv::NORM_MINMAX);
+    cv::Mat normalized;
+    cv::normalize(enhanced, normalized, 0, 255, cv::NORM_MINMAX);
+    normalized.convertTo(normalized, CV_8U);
+    cv::Mat colormap;
+    cv::applyColorMap(normalized, colormap, cv::COLORMAP_JET);
+    frame = colormap.clone();
+    cv::resize(frame, frame, cv::Size(1280, 720), cv::INTER_NEAREST);
+    cv::rotate(frame, frame, cv::ROTATE_180);
+    return frame;
+    /*
     double min_val, max_val;
     cv::Mat grad_x, grad_y, output;
     cv::resize(frame, frame, cv::Size(64, 64), 0, 0, cv::INTER_CUBIC);
@@ -631,13 +781,16 @@ cv::Mat SubsectionWidget::Filters::thermalAdaptiveInterpolation(cv::Mat frame){
     //cv::resize(output, output, cv::Size(1280, 720), cv::INTER_CUBIC);
     cv::resize(output, output, cv::Size(1280, 720), cv::INTER_NEAREST);
     return output;
+    */
 }
 
 cv::Mat SubsectionWidget::Filters::thermalOverlay(cv::Mat frame, cv::Mat thermal, float distance, float alpha){
+    if(distance == 0.0) return thermal;
+
     float cam_width = 2.0 * distance * tan(CAM_FOV.first / 2.0 * DEG_TO_RAD), cam_height = 2.0 * distance * tan(CAM_FOV.second / 2.0 * DEG_TO_RAD),
         thermal_width = 2.0 * distance * tan(THERMAL_FOV.first / 2.0 * DEG_TO_RAD), thermal_height = 2.0 * distance * tan(THERMAL_FOV.second / 2.0 * DEG_TO_RAD);
-    float left = std::max(-thermal_width/2.0, 7.0-(cam_width/2.0)), right = std::min(thermal_width/2.0, 7.0+(cam_width/2.0)),
-        up = std::min(thermal_height/2.0, (cam_height/2.0)-6.0), down = std::max(-thermal_height/2.0, 6.0-(cam_height/2.0));
+    float left = std::max(-thermal_width/2.0, THERMAL_X_DIFF-(cam_width/2.0)), right = std::min(thermal_width/2.0, THERMAL_X_DIFF+(cam_width/2.0)),
+        up = std::min(thermal_height/2.0, (cam_height/2.0)-THERMAL_Y_DIFF), down = std::max(-thermal_height/2.0, -(cam_height/2.0)-THERMAL_Y_DIFF);
     int cam_overlap_width = (right-left) / cam_width * frame.cols, cam_overlap_height = (up-down) / cam_height * frame.rows,
         thermal_overlap_width = (right-left) / thermal_width * thermal.cols, thermal_overlap_height = (up-down) / thermal_height * thermal.rows;
     //qDebug() << cam_width << " " << thermal_width << " " << left << " " << right << " " << cam_overlap_width << " " << thermal_overlap_width;
@@ -647,6 +800,7 @@ cv::Mat SubsectionWidget::Filters::thermalOverlay(cv::Mat frame, cv::Mat thermal
         return placeText("BOUNDS ERROR", frame);
     cv::Rect thermal_overlap(thermal.cols-thermal_overlap_width, thermal.rows-thermal_overlap_height, thermal_overlap_width, thermal_overlap_height);
     //qDebug() << frame.cols-cam_overlap_width << " " << frame.cols-cam_overlap_height << " " << cam_overlap_width << " " << cam_overlap_height;
+    //cv::Rect frame_overlap(0, 0, cam_overlap_width, cam_overlap_height);
     cv::Rect frame_overlap(0, 0, cam_overlap_width, cam_overlap_height);
     frame = frame(frame_overlap);
     //qDebug() << "done frame";
@@ -656,11 +810,11 @@ cv::Mat SubsectionWidget::Filters::thermalOverlay(cv::Mat frame, cv::Mat thermal
     cv::resize(frame, frame, cv::Size(1280, 720), cv::INTER_NEAREST);
     cv::resize(thermal, thermal, cv::Size(1280, 720), cv::INTER_NEAREST);
     cv::addWeighted(frame, 1.0 - alpha, thermal, alpha, 0.0, frame);
+
     return frame;
 }
 
 cv::Mat SubsectionWidget::Filters::detectHazmat(cv::Mat frame){
-
     int H = frame.rows;
     int W = frame.cols;
     std::vector<int> classIds;
@@ -699,11 +853,19 @@ cv::Mat SubsectionWidget::Filters::detectQR(cv::Mat frame, int mode){
     std::string decoded_text;
     if(mode == 0){
         cv::QRCodeDetector qr_decoder;
-        decoded_text = qr_decoder.detectAndDecode(frame, points);
+        try{
+            decoded_text = qr_decoder.detectAndDecode(frame, points);
+        }
+        catch(const cv::Exception& e){
+            return placeText("NO QR CODE DETECTED, EXC", frame);
+        }
     }
     else{
         cv::Mat grayscale;
         cv::cvtColor(frame, grayscale, cv::COLOR_BGR2GRAY);
+        cv::GaussianBlur(grayscale, grayscale, cv::Size(3, 3), 0);
+        grayscale = grayscale.clone();
+        cv::resize(grayscale, grayscale, cv::Size(), 2.0, 2.0, cv::INTER_LINEAR);
         zbar::ImageScanner scanner;
         scanner.set_config(zbar::ZBAR_NONE, zbar::ZBAR_CFG_ENABLE, 0);
         scanner.set_config(zbar::ZBAR_QRCODE, zbar::ZBAR_CFG_ENABLE, 1);
@@ -716,7 +878,7 @@ cv::Mat SubsectionWidget::Filters::detectQR(cv::Mat frame, int mode){
         for(zbar::Image::SymbolIterator symbol = zbar_frame.symbol_begin(); symbol != zbar_frame.symbol_end(); ++symbol){
             decoded_text = symbol->get_data();
             for(int i = 0; i < symbol->get_location_size(); ++i) {
-                points.emplace_back(cv::Point(symbol->get_location_x(i), symbol->get_location_y(i)));
+                points.emplace_back(cv::Point(symbol->get_location_x(i)/2.0, symbol->get_location_y(i)/2.0));
             }
         }
     }
@@ -746,6 +908,7 @@ cv::Mat SubsectionWidget::Filters::detectShape(cv::Mat frame, int corner, bool m
     cv::resize(gray_frame, gray_resized, cv::Size(), 1.0/scale, 1.0/scale, cv::INTER_AREA);
     cv::threshold(gray_resized, inv_thresh, threshold, 255, cv::THRESH_BINARY_INV);
 
+    std::vector<cv::Point> cont;
     if(mode){
         cv::Vec3f circ_sector;
         cv::HoughCircles(gray_resized, circles, cv::HOUGH_GRADIENT, 1, gray_resized.rows/8.0, 100, 50, gray_resized.rows/8, gray_resized.rows/4);
@@ -781,15 +944,22 @@ cv::Mat SubsectionWidget::Filters::detectShape(cv::Mat frame, int corner, bool m
             if(dis < min_dis){
                 min_dis = dis;
                 sector = contour;
+                cont = contours[i];
             }
         }
         if(min_dis == DBL_MAX)
             return placeText("NO CONTOURS", frame);
         inv_task_sector = inv_thresh(sector);
     }
+    cv::rectangle(frame, sector, cv::Scalar(0, 0, 255), 3);
 
     cv::bitwise_not(inv_task_sector, task_sector);
-    cv::findContours(task_sector, shapes, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    cv::findContours(task_sector, shapes, cv::RETR_LIST, cv::CHAIN_APPROX_SIMPLE);
+    //frame = frame(sector);
+    //cv::drawContours(frame, shapes, -1, cv::Scalar(0, 255, 0), 1);
+
+    qDebug() << "found " << shapes.size();
+
     min_dis = DBL_MAX;
     std::vector<cv::Point> shape;
     cv::Point sector_center(task_sector.cols/2, task_sector.rows/2);
@@ -805,7 +975,8 @@ cv::Mat SubsectionWidget::Filters::detectShape(cv::Mat frame, int corner, bool m
         if(aspect_ratio < 1.0f - shape_tolerance || aspect_ratio > 1.0f + shape_tolerance || solidity < 1.0f - shape_tolerance) continue;
         cv::Rect contour = cv::boundingRect(shapes[i]);
         cv::Point shape_center(contour.x + contour.width/2, contour.y + contour.height/2);
-        double dis = cv::norm(shape_center - sector_center);
+        //double dis = cv::norm(shape_center - sector_center); // prob not working as intended
+        double dis = (shape_center.x-sector_center.x)*(shape_center.x-sector_center.x) + (shape_center.y-sector_center.y)*(shape_center.y-sector_center.y);
         if(dis < min_dis){
             min_dis = dis;
             shape = shapes[i];
@@ -854,12 +1025,16 @@ void SubsectionWidget::updateFrame(cv::Mat frame, cv::Mat thermal, std::vector<u
         if(frame.type() != CV_8UC3)
             cv::cvtColor(frame, frame, cv::COLOR_BGR2RGB);
 
+        if(current_size.width() == current_size.height())
+            frame = fisheyeTransform(frame);
+
+
         QImage image(frame.data, frame.cols, frame.rows, frame.step, QImage::Format_RGB888);
         qt_frame = image.copy();  // ????????????????
         emit frameReady(qt_frame);
     }
     else
-        qWarning() << "SUBSECTION " << id << " UPDATE | Invalid frame: empty or corrupt";
+        qWarning() << "SubsectionWidget" << id << "::updateFrame | Invalid frame: empty or corrup cv::Mat";
 }
 
 void SubsectionWidget::mousePressEvent(QMouseEvent *event) {
@@ -880,7 +1055,7 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     left_layout->setSpacing(0);
     left_layout->setContentsMargins(0, 0, 0, 0);
     this->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    this->resize(1280, 720);
+    this->resize(1440, 800);
     is_fullscreen = false;
     int id = 0;
     for(int i = 0; i < 2; i++) {
@@ -892,9 +1067,9 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
                 if(fullscreen_widget){
                     clicked_widget->hide();
                     for(int k = 0; k < subsections.size(); k++){
-                        subsections[k]->resize(this->width() * 3 / 8, this->height() / 2);
+                        subsections[k]->resize(this->width() / 4, this->height() / 2);
                         left_layout->addWidget(subsections[k], k/2, k%2);
-                        subsections[k]->setFullScreenMode(false, QSize(this->width() * 3 / 8, this->height() / 2));
+                        subsections[k]->setFullScreenMode(false, QSize(this->width() / 3, this->height() / 2));
                         subsections[k]->show();
                     }
                     fullscreen_widget = nullptr;
@@ -904,14 +1079,15 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
                     for(int i = 0; i < subsections.size(); i++){
                         subsections[i]->hide();
                     }
-                    clicked_widget->resize(this->width() * 3 / 4, this->height());
+                    clicked_widget->resize(this->width() * 2 / 3, this->height());
                     left_layout->addWidget(clicked_widget, 0, 0, 2, 2);
-                    clicked_widget->setFullScreenMode(true, QSize(this->width() * 3 / 4, this->height()));
+                    clicked_widget->setFullScreenMode(true, QSize(this->width() * 2 / 3, this->height()));
                     clicked_widget->show();
                 }
             });
             connect(widget, &SubsectionWidget::selectionChanged, this, [this](){
                 QSet<QString> used_options;
+                qDebug() << "before for";
                 for(int k = 0; k < subsections.size(); k++){
                     std::pair<int, QString> selection = subsections[k]->getCurrentSelection();
                     QString selection_text = selection.second;
@@ -922,25 +1098,27 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
                     else
                         cam_map[k] = -1;
                 }
+                qDebug() << "after for";
                 emit selectionChanged(cam_map);
             });
+            connect(widget, &SubsectionWidget::resolutionChanged, this, [this, i, j](int id, int width, int height){ emit resolutionChanged(id, width, height); });
             //connect(widget, &SubsectionWidget::destructorCalled, this, [this](int id){ emit destructorCalled(id); });
             subsections.push_back(widget);
             left_layout->addWidget(widget, i, j);
         }
     }
     connect(this, &MainWindow::windowResized, this, [this](QSize new_size, QSize old_size){
-        model->resize(new_size.width() / 4, new_size.height() / 2);
-        model->resizeLocal(new_size.width() / 4, new_size.height() / 2);
-        dashboard_container->resize(new_size.width() / 4, new_size.height() / 2);
+        model->resize(new_size.width() / 3, new_size.height() / 2);
+        model->resizeLocal(new_size.width() / 3, new_size.height() / 2);
+        dashboard_container->resize(new_size.width() / 3, new_size.height() / 2);
         if(fullscreen_widget){
-            fullscreen_widget->resize(new_size.width() * 3 / 4, new_size.height());
-            fullscreen_widget->resizeLocal(new_size.width() * 3 / 4, new_size.height());
+            fullscreen_widget->resize(new_size.width() * 2 / 3, new_size.height());
+            fullscreen_widget->resizeLocal(new_size.width() * 2 / 3, new_size.height());
             return;
         }
         for(int i = 0; i < subsections.size(); i++){
-            subsections[i]->resize(new_size.width() * 3 / 8, new_size.height() / 2);
-            subsections[i]->resizeLocal(new_size.width() * 3 / 8, new_size.height() / 2);
+            subsections[i]->resize(new_size.width() / 3, new_size.height() / 2);
+            subsections[i]->resizeLocal(new_size.width() / 3, new_size.height() / 2);
         }
     });
     gas_label = new QLabel("No data");
@@ -1000,7 +1178,7 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
             font-size: 14px;
             color: white;
             border: none;
-            padding: 5px;
+            padding: 5px 10px 5px 10px;
             border-radius: 5px;
             margin: 2px;
             background-color: black;
@@ -1016,7 +1194,7 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
             font-size: 14px;
             color: white;
             border: none;
-            padding: 5px;
+            padding: 5px 10px 5px 10px;
             border-radius: 5px;
             margin: 2px;
             background-color: red;
@@ -1025,14 +1203,14 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
             background-color: orange;
         }
     )");
-    restart_button = new QPushButton("RESTART");
+    restart_button = new QPushButton("Restart");
     restart_button->setCheckable(true);
     restart_button->setStyleSheet(R"(
         QPushButton {
             font-size: 14px;
             color: white;
             border: none;
-            padding: 5px;
+            padding: 5px 10px 5px 10px;
             border-radius: 5px;
             margin: 2px;
             background-color: red;
@@ -1041,9 +1219,47 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
             background-color: orange;
         }
     )");
+    controller_button = new QPushButton("Controller");
+    controller_button->setCheckable(true);
+    controller_button->setStyleSheet(R"(
+        QPushButton {
+            font-size: 14px;
+            color: white;
+            border: none;
+            padding: 5px 10px 5px 10px;
+            border-radius: 5px;
+            margin: 2px;
+            background-color: black;
+        }
+        QPushButton:pressed {
+            background-color: gray;
+        }
+    )");
+
+    settings_label_1 = new QLabel(" Max speed ");
+    settings_label_2 = new QLabel(" 1600 ");
+    settings_label_3 = new QLabel(" Setting ");
+    settings_label_4 = new QLabel(" 5 ");
+    settings_slider_1 = new QSlider(Qt::Horizontal);
+    settings_slider_2 = new QSlider(Qt::Horizontal);
+    settings_slider_1->setRange(1400, 2000);
+    settings_slider_1->setValue(1600);
+    settings_slider_1->setTickInterval(100);
+    settings_slider_2->setRange(0, 10);
+    settings_slider_2->setValue(5);
+    settings_slider_2->setTickInterval(1);
+    connect(settings_slider_1, &QSlider::valueChanged, this, [this](int value){
+        settings_label_2->setText(QString(" %1 ").arg(value));
+    });
+    connect(settings_slider_2, &QSlider::valueChanged, this, [this](int value){
+        settings_label_4->setText(QString(" %1 ").arg(value));
+    });
+
     dashboard_container = new QWidget();
     dashboard_layout = new QGridLayout();
+    settings_layout = new QGridLayout();
     button_layout = new QHBoxLayout();
+    button_layout_2 = new QHBoxLayout();
     std::vector<QString> labels = {"Gas sensor: ", "Speech: ", "Magnetometer: "};
     for(int i = 0; i < labels.size(); i++){
         sensor_label = new QLabel(labels[i]);
@@ -1065,9 +1281,22 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     button_layout->addWidget(microphone_button);
     button_layout->addWidget(clear_button);
     button_layout->addWidget(estop_button);
-    button_layout->addWidget(restart_button);
+    //button_layout->addWidget(restart_button);
     button_layout->setContentsMargins(0, 0, 0, 0);
     button_layout->setSpacing(0);
+
+    button_layout_2->addWidget(controller_button);
+    button_layout_2->addWidget(restart_button);
+    button_layout_2->setContentsMargins(0, 0, 0, 0);
+    button_layout_2->setSpacing(0);
+
+    settings_layout->addWidget(settings_label_1, 0, 0);
+    settings_layout->addWidget(settings_slider_1, 0, 1);
+    settings_layout->addWidget(settings_label_2, 0, 2);
+    settings_layout->addWidget(settings_label_3, 1, 0);
+    settings_layout->addWidget(settings_slider_2, 1, 1);
+    settings_layout->addWidget(settings_label_4, 1, 2);
+
     connect(microphone_button, &QPushButton::clicked, this, [this](){ emit buttonChanged(microphone_button->isChecked()); });
     connect(clear_button, &QPushButton::clicked, this, [this](){
         gas_label->setText("No data");
@@ -1077,16 +1306,19 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     connect(estop_button, &QPushButton::pressed, this, [this](){ emit estopCalled(); });
     connect(restart_button, &QPushButton::clicked, this, [this](){
         QMessageBox::StandardButton reply;
-        reply = QMessageBox::warning(this, "Restart relay", "<div align='center'>Are you sure you want to remotely restart the relay?<br>Connection will be forcibly closed.</div>", QMessageBox::Yes | QMessageBox::Cancel);
+        reply = QMessageBox::warning(this, "Restart relay", "<div align='center'>Are you sure you want to remotely restart the relay?<br>Connection will be forcibly closed.<br>MAKE SURE THE RELAY WAS LAUNCHED, NOT RAN</div>", QMessageBox::Yes | QMessageBox::Cancel);
         if(reply == QMessageBox::Yes)
             emit restartCalled();
     });
+    connect(controller_button, &QPushButton::clicked, this, [this](){ emit controllerCalled(); });
     QVBoxLayout* temp = new QVBoxLayout();
     temp->addLayout(dashboard_layout);
     temp->addLayout(button_layout);
+    temp->addLayout(button_layout_2);
+    temp->addLayout(settings_layout);
     dashboard_container->setLayout(temp);
-    dashboard_container->resize(320, 360);
     dashboard_container->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    //dashboard_container->resize(480, 200);
 
     // 3D MODEL VIEWER
     model = new ModelWidget(this);
@@ -1095,7 +1327,7 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
 
     connect(this, &MainWindow::modelUpdated, model, &ModelWidget::updateState);
 
-    main_layout->addWidget(left_container, 3);
+    main_layout->addWidget(left_container, 2);
     main_layout->addLayout(right_layout, 1);
 }
 
@@ -1105,9 +1337,15 @@ void MainWindow::setCamPorts(int num_cams, std::vector<std::string> cam_names){
     }
 }
 
-void MainWindow::updateFrame(int id, std::vector<unsigned char> data){
-    cv::Mat frame = cv::imdecode(data, cv::IMREAD_COLOR);
-    cv::cvtColor(frame, frame, cv::COLOR_BGR2RGB);
+void MainWindow::updateFrame(int id, std::vector<unsigned char> data, bool bypass){
+    cv::Mat frame, image;
+    if(bypass){
+        image = cv::Mat(720, 1280, CV_8UC3, data.data());
+    }
+    else{
+        image = cv::imdecode(data, cv::IMREAD_COLOR);
+    }
+    cv::cvtColor(image, frame, cv::COLOR_BGR2RGB);
     int sub_id = -1;
     std::vector<int> sub_ids = {};
     for(auto it = cam_map.begin(); it != cam_map.end(); it++){
@@ -1146,20 +1384,23 @@ template<typename T> void MainWindow::updateDashbord(int index, T data){
             magnetometer_label->setText(QString("X: %1\nY: %2\nZ: %3").arg(data.x(), 0, 'f', 2).arg(data.y(), 0, 'f', 2).arg(data.z(), 0, 'f', 2));
     }
     else
-        qWarning() << "WINDOW UPDATE | Invalid dashboard index: out of bounds";
+        qCritical() << "MainWindow::updateDashboard | Invalid data index: out of bounds";
 }
 
 // SIGNAL INTERCEPT
 void MainWindow::closeEvent(QCloseEvent* event) {
     emit windowClosing();
+
     qInfo() << "Closing main window...";
+
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     for(int i = 0; i < subsections.size(); i++){
         subsections[i]->destroy();
     }
-    qInfo() << "Filter channels closed";
+
     model->destroy();
     event->accept();
+
     qInfo() << "Bye";
 }
 
@@ -1205,14 +1446,14 @@ RTPStreamHandler::RTPStreamHandler(int port, std::string address, PayloadType ty
     recv_socket_address.sin_port = htons(port);
     recv_socket_address.sin_addr.s_addr = INADDR_ANY;
     bind(recv_socket, (struct sockaddr*)&recv_socket_address, socket_address_size);
-    qInfo() << "Channel created bound to ports (" << port << ", " << port + 1 << ")";
+
+    qInfo() << "Channel created, bound to ports (" << port << ", " << port + 1 << ")";
 }
 
 RTPStreamHandler::~RTPStreamHandler(){
     shutdown(recv_socket, SHUT_RDWR);
     close(send_socket);
     close(recv_socket);
-    qInfo() << "Closing channel (" << stream->port << ", " << stream->port + 1 << ")";
 }
 
 template <typename T> void RTPStreamHandler::sendPacket(std::vector<T> data, int marker, int delay){
@@ -1247,7 +1488,8 @@ template <typename T> void RTPStreamHandler::sendPacket(std::vector<T> data, int
         std::memcpy(packet.data() + sizeof(RTPHeader), data.data() + (i*max_size), current_size);
 
         if(sendto(send_socket, (const char*)packet.data(), packet.size(), 0, (struct sockaddr*)&send_socket_address, socket_address_size) < 0){
-            qWarning() << "ROTAS SEND | Winsock error: " << strerror(errno);
+            int error = errno;
+            qWarning() << "RTPStreamHandler::sendPacket | Socket error: " << error << " " << strerror(error);
         }
         if(delay != 0)
             std::this_thread::sleep_for(std::chrono::milliseconds(delay));
@@ -1263,12 +1505,12 @@ void RTPStreamHandler::recvPacket(){
         if(bytes_received < 0){
             int error = errno;
             if(error != EAGAIN && error != EWOULDBLOCK)
-                qCritical() << "ROTAS RECV | Socket error: " << error << " " << strerror(error);
+                qCritical() << "RTPStreamHandler::recvPacket | Socket error: " << error << " " << strerror(error);
             return;
         }
         else if(bytes_received < sizeof(RTPHeader)) {
             if(bytes_received != 0)
-                qCritical() << "ROTAS RECV | Invalid RTP header: incomplete packet received, size: " << bytes_received;
+                qCritical() << "RTPStreamHandler::recvPacket | Invalid RTP header: incomplete packet, size: " << bytes_received;
             return;
         }
 
@@ -1287,7 +1529,7 @@ void RTPStreamHandler::recvPacket(){
             fragments.resize(num_fragments);
         }
         else if(ssrc != header->ssrc){
-            qWarning() << "ROTAS RECV | Fragmentation error: previous packet dropped";
+            qWarning() << "RTPStreamHandler::recvPacket | Fragmentation error: different ssrc, previous packet dropped";
             i = 0;
             fragments.clear();
             num_fragments = header->m;
@@ -1325,18 +1567,20 @@ void RTPStreamHandler::recvPacket(){
 // --- Universal ---
 AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
     qInfo() << "Starting GUI...";
+
     window = new MainWindow;
     window->setWindowTitle("GUI - beta");
-    window->resize(1280, 720);
+    window->resize(1440, 800);
     QObject::connect(window, &MainWindow::windowClosing, [this](){ this->destroy(); });
     this->port = port;
 
-    qInfo() << "Starting base channel...";
+    qInfo() << "Initializing base channel...";
+
     base_channel = new SocketStruct;
     base_channel->target_socket = new RTPStreamHandler(port, CLIENT_IP, PayloadType::ROS2_ARRAY);
     base_channel->target_socket->setUCharCallback([this](std::vector<uchar> data){
         if(data.size() < sizeof(BasePacket)+sizeof(float)){
-            qCritical() << "APPHANDLER BASE CB | Invalid payload: incomplete data";
+            qCritical() << "AppHandler::baseUCharCallback | Invalid payload: incomplete payload, size: " << data.size();
             return;
         }
         std::vector<float> float_data((sizeof(BasePacket)/sizeof(float))+1), thermal(64);
@@ -1363,7 +1607,26 @@ AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
     base_channel->is_recv_running.store(true);
     base_channel->is_send_running.store(true);
 
-    qInfo() << "Starting audio channel...";
+    qInfo() << "Initializing PortAudio (stderr silenced)...";
+
+    int stderr_backup = -1;
+    int dev_null = -1;
+    fflush(stderr);
+    stderr_backup = dup(STDERR_FILENO);
+    dev_null = open("/dev/null", O_WRONLY);
+    if(dev_null != -1 && stderr_backup != -1){
+        dup2(dev_null, STDERR_FILENO);
+        close(dev_null);
+    }
+    Pa_Initialize();
+    Pa_OpenDefaultStream(&stream, 0, 1, paInt16, SAMPLE_RATE, AUDIO_BUFFER_SIZE, nullptr, nullptr);
+    if(stderr_backup != -1) {
+        fflush(stderr);
+        dup2(stderr_backup, STDERR_FILENO);
+        close(stderr_backup);
+    }
+
+    qInfo() << "Initializing audio channel...";
 
     audio_channel = new SocketStruct;
     audio_channel->target_socket = new RTPStreamHandler(port + 2, CLIENT_IP, PayloadType::AUDIO_PCM);
@@ -1379,49 +1642,64 @@ AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
         }
         Pa_WriteStream(stream, output.data(), frames);
     });
-    audio_channel->is_recv_running.store(true);
-    audio_channel->is_send_running.store(true);
-
     opus_decoder = opus_decoder_create(SAMPLE_RATE, 1, &pa_error);
 
-    int stderr_backup = -1;
-    int dev_null = -1;
-    fflush(stderr);
-    stderr_backup = dup(STDERR_FILENO);
-    dev_null = open("/dev/null", O_WRONLY);
-    if(dev_null != -1 && stderr_backup != -1){
-        dup2(dev_null, STDERR_FILENO);
-        close(dev_null);
-    }
-    qInfo() << "Initializing PortAudio (stderr silenced)...";
-    Pa_Initialize();
-    if(stderr_backup != -1) {
-        fflush(stderr);
-        dup2(stderr_backup, STDERR_FILENO);
-        close(stderr_backup);
-    }
+    qInfo() << "Initializing controller channel...";
 
-    Pa_OpenDefaultStream(&stream, 0, 1, paInt16, SAMPLE_RATE, AUDIO_BUFFER_SIZE, nullptr, nullptr);
-    is_audio_active.store(false);
+    controller_channel = new SocketStruct;
+    controller_channel->target_socket = new RTPStreamHandler(port + 4, CLIENT_IP, PayloadType::ROS2_ARRAY);
+    controller_channel->is_recv_running.store(false);
+    controller_channel->is_send_running.store(true);
+
+    qInfo() << "Initializing vosk model...";
+
+    // - remove the first two "/" to skip vosk init -
+    /*
+    vosk_set_log_level(-1);
+    vosk_model = vosk_model_new(VOSK_MODEL_PATH);
+    vocab_json = nlohmann::json(VOSK_VOCAB).dump();
+    //vosk_recognizer = vosk_recognizer_new_grm(vosk_model, SAMPLE_RATE, vocab_json.c_str());
+    //*/
+    // ??????????????????????
+    //vosk_recognizer = vosk_recognizer_new(vosk_model, SAMPLE_RATE);
+
     connect(window, &MainWindow::buttonChanged, this, [this](bool is_pressed){ is_audio_active.store(is_pressed); });
     qRegisterMetaType<std::map<int, int>>("std::map<int,int>");
     connect(window, &MainWindow::selectionChanged, this, [this](std::map<int,int> cam_map){
         for(int i = 0; i < video_channels.size(); i++){
             video_channels[i]->is_active.store(false);
         }
+        for(int i = 0; i < cams.size(); i++){
+            cams[i]->is_active.store(false);
+        }
         for(auto it = cam_map.begin(); it != cam_map.end(); it++){
-            if(it->second >= 0)
+            if(it->second >= 0 && it->second < video_channels.size())
                 video_channels[it->second]->is_active.store(true);
+            else if(it->second >= 0)
+                cams[it->second-num_cams]->is_active.store(true);
         }
     });
+
     connect(window, &MainWindow::estopCalled, this, [this](){
         qInfo() << "E-Stop called";
         base_channel->target_socket->sendPacket(std::vector<int>{0, -1});
+    });
+    connect(window, &MainWindow::controllerCalled, this, [this](){
+        qInfo() << "Controller restart called";
+        controller_channel->is_active.store(false);
+        controller->destroy();
+        controller = new Controller(1000);
+        controller_channel->is_active.store(true);
+    });
+    connect(window, &MainWindow::resolutionChanged, this, [this](int id, int width, int height){
+        std::lock_guard<std::mutex> lock(video_mutex);
+        video_channels[id]->int_data = std::vector<int>{width, height};
     });
     connect(window, &MainWindow::restartCalled, this, [this](){
         qInfo() << "Relay restart called";
         base_channel->target_socket->sendPacket(std::vector<int>{0, -2});
     });
+
     qInfo() << "Setup complete";
 }
 
@@ -1436,6 +1714,7 @@ AppHandler::~AppHandler(){
         base_channel->send_thread.join();
     if(base_channel->recv_thread.joinable())
         base_channel->recv_thread.join();
+
     qInfo() << "Base channel closed";
 
     is_audio_active.store(false);
@@ -1450,6 +1729,7 @@ AppHandler::~AppHandler(){
     Pa_CloseStream(stream);
     Pa_Terminate();
     opus_decoder_destroy(opus_decoder);
+
     qInfo() << "Audio channels closed";
 
     if(vosk_thread.joinable())
@@ -1458,6 +1738,16 @@ AppHandler::~AppHandler(){
         vosk_recognizer_free(vosk_recognizer);
     if(vosk_model)
         vosk_model_free(vosk_model);
+
+    for(int i = 0; i < cams.size(); i++){
+        cams[i]->is_active.store(false);
+        cams[i]->is_send_running.store(false);
+        if(cams[i]->cam_thread.joinable())
+            cams[i]->cam_thread.join();
+        cams[i]->cap->release();
+    }
+
+    qInfo() << "Vosk model closed";
 
     for(int i = 0; i < video_channels.size(); i++){
         video_channels[i]->is_recv_running.store(false);
@@ -1468,31 +1758,65 @@ AppHandler::~AppHandler(){
         if(video_channels[i]->send_thread.joinable())
             video_channels[i]->send_thread.join();
     }
+
     qInfo() << "Video channels closed";
 }
 
 void AppHandler::init(){
-    int num_cams = 0;
-    std::vector<std::string> cam_names;
+    num_cams = 0;
+    local_cams = 0;
+    local_cam_ports = {2};
+
+    for(int i = 0; i < local_cams; i++){
+        CamStruct* cam = new CamStruct;
+        cam->cap = new cv::VideoCapture(local_cam_ports[i], cv::CAP_V4L2);
+        cam->cap->set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M','J','P','G'));
+        cam->cap->set(cv::CAP_PROP_FRAME_WIDTH, 1280);
+        cam->cap->set(cv::CAP_PROP_FRAME_HEIGHT, 720);
+        cams.push_back(std::move(cam));
+        cams[i]->is_active.store(false);
+        cams[i]->is_send_running.store(true);
+        cams[i]->cam_thread = std::thread([i, this](){
+            while(cams[i]->is_send_running.load()){
+                if(!cams[i]->is_active.load()){
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                }
+                cv::Mat frame;
+                (*cams[i]->cap) >> frame;
+                //frame = undistortFisheyeApprox(frame);
+                std::vector<unsigned char> buffer(frame.data, frame.data + frame.total()*frame.elemSize());
+                window->updateFrame(i+num_cams, buffer, true);
+                std::this_thread::sleep_for(std::chrono::milliseconds(33));
+            }
+        });
+    }
+
     qInfo() << "Awaiting relay connection...";
 
+    std::vector<std::string> cam_names;
+
     // - remove the first two "/" for connectionless debugging -
-    /*
+    ///*
     base_channel->target_socket->recvPacket();
     base_channel->target_socket->sendPacket(std::vector<int>{0, 0});
     {
         std::lock_guard<std::mutex> lock(base_channel->data_mutex);
         if(base_channel->float_data.empty() || base_channel->float_data[0] < 0){
-            qCritical() << "APPHANDLER INIT | Base handshake failed";
+            qCritical() << "AppHandler::baseSendPacket | Handshake failed: missing data or invalid marker";
             return;
         }
         num_cams = (int)base_channel->float_data[0];
         cam_names = base_channel->string_data;
     }
+    for(int i = 0; i < local_cams; i++){
+        cam_names.push_back("Local " + std::to_string(i+1));
+    }
+    window->setCamPorts(num_cams+local_cams, cam_names);
     //*/
-    window->setCamPorts(num_cams, cam_names);
+    //window->setCamPorts(num_cams+local_cams, {"Local 1"});
 
-    qInfo() << "Connection established. Received " << num_cams << " video sources\nStarting base channel...";
+    qInfo() << "Connection established. Received " << num_cams << " video sources and using " << local_cams << " locals\nStarting base channel...";
 
     base_channel->recv_thread = std::thread([this](){
         while(base_channel->is_recv_running.load()){
@@ -1501,9 +1825,10 @@ void AppHandler::init(){
     });
 
     qInfo() << "Starting video channels...";
+
     for(int i = 0; i < num_cams; i++){
         SocketStruct* video_socket = new SocketStruct;
-        video_socket->target_socket = new RTPStreamHandler(port + (2 * i) + 4, CLIENT_IP, PayloadType::VIDEO_MJPEG);
+        video_socket->target_socket = new RTPStreamHandler(port + (2 * i) + 6, CLIENT_IP, PayloadType::VIDEO_MJPEG);
         video_channels.push_back(std::move(video_socket));
     }
     for(int i = 0; i < video_channels.size(); i++){
@@ -1518,13 +1843,27 @@ void AppHandler::init(){
         });
         video_channels[i]->send_thread = std::thread([i, this](){
             while(video_channels[i]->is_send_running.load()){
-                video_channels[i]->target_socket->sendPacket(std::vector<int>{0, (int)video_channels[i]->is_active.load()});
+                std::vector<int> data;
+                {
+                    std::lock_guard<std::mutex> lock(video_mutex);
+                    data = video_channels[i]->int_data;
+                }
+                if(data.empty())
+                    video_channels[i]->target_socket->sendPacket(std::vector<int>{0, (int)video_channels[i]->is_active.load()});
+                else if(data.size() == 2){
+                    video_channels[i]->target_socket->sendPacket(std::vector<int>{1, data[0], data[1]});
+                    std::lock_guard<std::mutex> lock(video_mutex);
+                    video_channels[i]->int_data.clear();
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
         });
     }
 
     qInfo() << "Starting audio channel...";
+
+    audio_channel->is_recv_running.store(true);
+    audio_channel->is_send_running.store(true);
     Pa_StartStream(stream);
     audio_channel->recv_thread = std::thread([this](){
         while(audio_channel->is_recv_running.load()){
@@ -1538,18 +1877,28 @@ void AppHandler::init(){
         }
     });
 
+    qInfo() << "Starting controller channel...";
+
+    controller = new Controller(1000);
+    controller_channel->is_active.store(true);
+    controller_channel->send_thread = std::thread([this](){
+        while(controller_channel->is_send_running.load()){
+            if(!controller_channel->is_active.load()){
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                continue;
+            }
+            std::vector<int> data = controller->readState();
+            controller_channel->target_socket->sendPacket(data);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    });
 
     qInfo() << "Starting vosk model...";
-    /*
-    vosk_set_log_level(-1);
-    vosk_model = vosk_model_new(VOSK_MODEL_PATH);
-    std::vector<std::string> vocab = {"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"};
-    vocab_json = nlohmann::json(vocab).dump();
-    vosk_recognizer = vosk_recognizer_new_grm(vosk_model, SAMPLE_RATE, vocab_json.c_str());
-    //vosk_recognizer = vosk_recognizer_new(vosk_model, SAMPLE_RATE);
+
+    is_audio_active.store(false);
     vosk_thread = std::thread([this](){
         while(audio_channel->is_recv_running.load()){
-            if(!is_audio_active.load()){
+            if(!is_audio_active.load() || !vosk_model){
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 continue;
             }
@@ -1564,60 +1913,20 @@ void AppHandler::init(){
             if(!buffer.empty()){
                 const char* audio_bytes = reinterpret_cast<const char*>(buffer.data());
                 int audio_size = buffer.size() * sizeof(opus_int16);
-                if(vosk_recognizer_accept_waveform(vosk_recognizer, audio_bytes, audio_size)) {
+                if(vosk_recognizer_accept_waveform(vosk_recognizer, audio_bytes, audio_size)){
                     const char* result = vosk_recognizer_result(vosk_recognizer);
-                    std::string resultStr(result);
-                    if (resultStr.find("\"text\"") != std::string::npos) {
-                        // Extract text between quotes after "text":
-                        size_t start = resultStr.find("\"text\"");
-                        if (start != std::string::npos) {
-                            start = resultStr.find(":", start);
-                            if (start != std::string::npos) {
-                                start = resultStr.find("\"", start);
-                                if (start != std::string::npos) {
-                                    start++;
-                                    size_t end = resultStr.find("\"", start);
-                                    if (end != std::string::npos) {
-                                        std::string text = resultStr.substr(start, end - start);
-                                        if (!text.empty()) {
-                                            qDebug() << "FINAL: " << text;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                else {
-                    const char* partial = vosk_recognizer_partial_result(vosk_recognizer);
-                    std::string partialStr(partial);
-                    if (partialStr.find("\"partial\"") != std::string::npos) {
-                        size_t start = partialStr.find("\"partial\"");
-                        if (start != std::string::npos) {
-                            start = partialStr.find(":", start);
-                            if (start != std::string::npos) {
-                                start = partialStr.find("\"", start);
-                                if (start != std::string::npos) {
-                                    start++;
-                                    size_t end = partialStr.find("\"", start);
-                                    if (end != std::string::npos) {
-                                        std::string text = partialStr.substr(start, end - start);
-                                        if (!text.empty() && text.length() > 2) {
-                                            qDebug() << "Partial: " << text << "\r";
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    std::string text = parseJSON(std::string(result), "\"text\"");
+                    const std::string prefix = "the ";
+                    if(text.rfind(prefix, 0) == 0)
+                        text = text.substr(prefix.length());
+                    if(!text.empty())
+                        window->updateDashbord(1, QString::fromStdString(text));
                 }
             }
-            else {
+            else
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
         }
     });
-    */
 
     window->show();
 

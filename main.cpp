@@ -1,6 +1,14 @@
 #include <QApplication>
 #include "mainwindow.h"
 
+/*
+    TODO:
+    - Pass settings to relay (and publish them)
+    - Test thermal implementation
+    - Check if launched before crash (on relay)
+    - Fix frame scaling for different resolutions
+*/
+
 // Qt3D testing
 /*
 int main(int argc, char *argv[])
@@ -455,7 +463,7 @@ cv::Mat placeText(std::string text, cv::Mat frame){
     return frame;
 }
 
-//    std::vector<QString> shape_buttons{ "Upper left", "Upper right", "Lower left", "Lower right" };
+// std::vector<QString> shape_buttons{ "Upper left", "Upper right", "Lower left", "Lower right" };
 cv::Mat detectShape(cv::Mat frame, int corner = 0, bool mode = false){
     double scale = 1.0, min_dis = DBL_MAX;
     cv::Mat gray_frame, gray_resized, inv_thresh, inv_task_sector, task_sector;
