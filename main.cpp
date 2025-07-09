@@ -548,6 +548,8 @@ cv::Mat detectShape(cv::Mat frame, int corner = 0, bool mode = false){
     return frame;
 }
 
+#include <netdb.h>
+
 int main(int argc, char* argv[]){
     QApplication app(argc, argv);
 
@@ -556,8 +558,20 @@ int main(int argc, char* argv[]){
     WSAData wsa_data;
     WSAStartup(MAKEWORD(2, 2), &wsa_data);
 #else
-    qInfo() << "Hi Linux";
+    qInfo() << "--- Hi Linux ---";
 #endif
+
+/*
+    std::string hostname = "robotec-rescue-jetson.local", port = "12345";
+    struct addrinfo hints = {}, *res;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    int status = getaddrinfo(hostname.c_str(), port.c_str(), &hints, &res);
+    if(status != 0){
+        qDebug() << "getaddrinfo error: " << gai_strerror(status);
+    }
+    qDebug() << "got: " << res->ai_addr << " " << res->ai_addrlen;
+    */
 
     AppHandler* app_handler = new AppHandler(8000);
     app_handler->init();

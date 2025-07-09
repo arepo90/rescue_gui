@@ -35,6 +35,7 @@
 #include <QPainter>
 
 // --- c++ ---
+#include <deque>
 #include <SDL2/SDL.h>
 #include <vosk_api.h>
 #include <string>
@@ -68,13 +69,12 @@
 #define SAMPLE_RATE 16000           // 16 kHz
 // "192.168.50.134" eth
 // "192.168.50.249" wifi
-#define CLIENT_IP "192.168.0.237"
+#define CLIENT_IP "127.0.0.1"    //
 #define MAX_UDP_PACKET_SIZE 65507   // 65507 bytes
 #define FRAGMENTATION_FLAG 0x8000   // RTP Header flag
 
 // --- Filter settings ---
-#define THERMAL_X_DIFF 7.0f
-#define THERMAL_Y_DIFF 6.0f
+#define THERMAL_Y_DIFF 6.5f
 #define CFG_PATH "../../assets/hazmat_net/yolo.cfg"
 #define WEIGHTS_PATH "../../assets/hazmat_net/yolo.weights"
 #define LABELS_PATH "../../assets/hazmat_net/labels.names"
@@ -86,7 +86,7 @@ const cv::Size INPUT_SIZE = cv::Size(416, 416);
 #define VOSK_MODEL_PATH "../../assets/vosk_model"
 const std::vector<std::string> VOSK_VOCAB = {"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"};
 const std::pair<float, float> THERMAL_FOV{60.0, 60.0};
-const std::pair<float, float> CAM_FOV{80.0, 45.0};
+const std::pair<float, float> CAM_FOV{154.0, 100.0};
 
 struct RTPHeader {
     uint16_t cc:4;
@@ -104,18 +104,18 @@ struct BasePacket{
     float body_x = 0;
     float body_y = 0;
     float body_z = 0;
-    float arm_l = 0;
-    float arm_r = 0;
+    float arms = 0;
     float art_1 = 0;
     float art_2 = 0;
     float art_3 = 0;
     float art_4 = 0;
+    float art_5 = 0;
+    float art_6 = 0;
     float track_l = 0;
     float track_r = 0;
     float magnetometer_x = 0;
     float magnetometer_y = 0;
     float magnetometer_z = 0;
-    float gas_ppm = 0;
 };
 
 enum class PayloadType : uint8_t{
@@ -126,6 +126,7 @@ enum class PayloadType : uint8_t{
 
 // --- Helper func ---
 float nMap(float n, float minIn, float maxIn, float minOut, float maxOut);
+float radToDeg(float rad);
 std::string parseJSON(std::string json, std::string keyword);
 cv::Mat fisheyeTransform(cv::Mat frame);
 
@@ -143,13 +144,16 @@ private:
 class Controller : public QObject{
     Q_OBJECT
 public:
-    Controller(int dead_zone = 1000);
+    Controller(int dead_zone = 1500);
     ~Controller();
     void destroy(){ delete this; }
-    std::vector<int> readState();
+    std::vector<int> readState(int id = 0);
+    int getAvailable(){ return available; }
 private:
-    SDL_GameController* controller = nullptr;
+    SDL_GameController* controller_1 = nullptr;
+    SDL_GameController* controller_2 = nullptr;
     int dead_zone;
+    int available = 0;
 };
 
 class ModelWidget : public QWidget{
@@ -388,14 +392,16 @@ signals:
     void buttonChanged(bool is_active);
     void modelUpdated(BasePacket model_state);
     void windowResized(QSize newSize, QSize oldSize);
-    void estopCalled();
+    void estopCalled(bool state);
     void restartCalled();
     void controllerCalled();
     void resolutionChanged(int id, int width, int height);
+    void settingsChanged(int value);
 protected:
     void closeEvent(QCloseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
 private:
+    QFrame* test;
     std::mutex thermal_mutex;
     std::vector<float> thermal_data;
     QHBoxLayout* main_layout;
@@ -405,16 +411,22 @@ private:
     QGridLayout* dashboard_layout;
     QGridLayout* settings_layout;
     QVBoxLayout* right_layout;
+    std::vector<QHBoxLayout*> inner;
+    std::vector<QWidget*> container;
     QWidget* left_container;
     QWidget* dashboard_container;
     QLabel* sensor_label;
-    QLabel* gas_label;
+    QLabel* track_label;
     QLabel* speech_label;
     QLabel* magnetometer_label;
     QLabel* settings_label_1;
     QLabel* settings_label_2;
     QLabel* settings_label_3;
     QLabel* settings_label_4;
+    QLabel* speech_indicator;
+    QLabel* magnetometer_indicator;
+    QLabel* track_indicator;
+    std::vector<bool> indicators;
     QSlider* settings_slider_1;
     QSlider* settings_slider_2;
     QPushButton* microphone_button;
@@ -430,6 +442,27 @@ private:
     std::map<int, int> cam_map;
 };
 
+
+class AudioPlayer {
+public:
+    AudioPlayer();
+    ~AudioPlayer();
+    void destroy(){ delete this; }
+    void passAudio(std::vector<int16_t> data);
+private:
+    int audioProcess(int16_t* output, unsigned long buffer_size);
+    static int audioCallback(const void* input, void* output, unsigned long buffer_size, const PaStreamCallbackTimeInfo* time_info, PaStreamCallbackFlags status_flags, void* user_data){
+        // --- PortAudio callback requires a static function pointer, so this is needed as a middleman ---
+        AudioPlayer* player = static_cast<AudioPlayer*>(user_data);
+        return player->audioProcess(static_cast<int16_t*>(output), buffer_size);
+    }
+    PaStream* stream = nullptr;
+    PaStreamParameters stream_params;
+    std::queue<std::vector<int16_t>> audio_queue;
+    std::mutex queue_mutex;
+    int offset = 0;
+};
+
 class AppHandler : public QObject{
     Q_OBJECT
 public:
@@ -438,6 +471,7 @@ public:
     void init();
     void destroy(){ delete this; }
 private:
+    bool toggle = false;
     int num_cams;
     int local_cams;
     Controller* controller;
@@ -459,8 +493,10 @@ private:
     std::mutex vosk_mutex;
     std::mutex video_mutex;
     PaStream* stream;
+    PaStreamParameters stream_params;
     std::string vocab_json;
     std::vector<int> local_cam_ports;
+    AudioPlayer* player;
 };
 
 #endif

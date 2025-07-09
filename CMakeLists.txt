@@ -58,12 +58,36 @@ elseif(UNIX)
     pkg_check_modules(ZBAR REQUIRED zbar)
     pkg_check_modules(SDL2 REQUIRED sdl2)
 
-    set(VOSK_ROOT "/home/arepo/vosk/vosk-linux-x86_64-0.3.45" CACHE PATH "Path to Vosk installation directory")
-    add_library(Vosk::vosk SHARED IMPORTED)
-    set_target_properties(Vosk::vosk PROPERTIES
-        IMPORTED_LOCATION "${VOSK_ROOT}/libvosk.so"
-        INTERFACE_INCLUDE_DIRECTORIES "${VOSK_ROOT}"
+    find_library(VOSK_LIBRARY NAMES vosk PATHS "/home/arepo/vosk-api/src")
+    set(KALDI_ROOT "/opt/kaldi")
+    set(OPENFST_ROOT "/opt/kaldi/tools/openfst")
+    set(KALDI_LIBRARIES
+        "${KALDI_ROOT}/src/online2/libkaldi-online2.so"
+        "${KALDI_ROOT}/src/ivector/libkaldi-ivector.so"
+        "${KALDI_ROOT}/src/nnet3/libkaldi-nnet3.so"
+        "${KALDI_ROOT}/src/chain/libkaldi-chain.so"
+        "${KALDI_ROOT}/src/nnet2/libkaldi-nnet2.so"
+        "${KALDI_ROOT}/src/cudamatrix/libkaldi-cudamatrix.so"
+        "${KALDI_ROOT}/src/decoder/libkaldi-decoder.so"
+        "${KALDI_ROOT}/src/lat/libkaldi-lat.so"
+        "${KALDI_ROOT}/src/fstext/libkaldi-fstext.so"
+        "${KALDI_ROOT}/src/hmm/libkaldi-hmm.so"
+        "${KALDI_ROOT}/src/transform/libkaldi-transform.so"
+        "${KALDI_ROOT}/src/gmm/libkaldi-gmm.so"
+        "${KALDI_ROOT}/src/tree/libkaldi-tree.so"
+        "${KALDI_ROOT}/src/matrix/libkaldi-matrix.so"
+        "${KALDI_ROOT}/src/util/libkaldi-util.so"
+        "${KALDI_ROOT}/src/base/libkaldi-base.so"
     )
+    find_library(OPENBLAS_LIBRARY NAMES openblas PATHS "/opt/kaldi/tools/OpenBLAS")
+    find_library(FST_LIBRARY NAMES fst PATHS "${OPENFST_ROOT}/lib")
+
+    #set(VOSK_ROOT "/home/arepo/vosk-api/src" CACHE PATH "Path to Vosk installation directory")
+    #add_library(Vosk::vosk SHARED IMPORTED)
+    #set_target_properties(Vosk::vosk PROPERTIES
+    #    IMPORTED_LOCATION "${VOSK_ROOT}/libvosk.so"
+    #    INTERFACE_INCLUDE_DIRECTORIES "${VOSK_ROOT}"
+    #)
 endif()
 
 if(WIN32)
@@ -121,11 +145,15 @@ elseif(UNIX)
         ${PORTAUDIO_LIBRARIES}
         ${ZBAR_LIBRARIES}
         Threads::Threads
-        Vosk::vosk
+        #Vosk::vosk
         ${CMAKE_DL_LIBS}
         pthread
         nlohmann_json::nlohmann_json
         ${SDL2_LIBRARIES}
+        ${VOSK_LIBRARY}
+        ${KALDI_LIBRARIES}
+        ${OPENBLAS_LIBRARY}
+        ${FST_LIBRARY}
     )
     target_include_directories(test PRIVATE
         ${OpenCV_INCLUDE_DIRS}
@@ -133,6 +161,9 @@ elseif(UNIX)
         ${PORTAUDIO_INCLUDE_DIRS}
         ${ZBAR_INCLUDE_DIRS}
         ${SDL2_INCLUDE_DIRS}
+        "/home/arepo/vosk-api/src"
+        "/opt/kaldi/src"
+        "/opt/kaldi/tools/openfst/include"
     )
     set_target_properties(test PROPERTIES
         INSTALL_RPATH "${VOSK_ROOT}"

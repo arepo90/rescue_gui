@@ -5,6 +5,10 @@ float nMap(float n, float minIn, float maxIn, float minOut, float maxOut){
     return (n - minIn) / (maxIn - minIn) * (maxOut - minOut) + minOut;
 }
 
+float radToDeg(float rad){
+    return rad * 180.0 /  M_PI;
+}
+
 cv::Mat fisheyeTransform(cv::Mat frame){
     int w = frame.cols;
     int h = frame.rows;
@@ -43,52 +47,67 @@ Controller::Controller(int dead_zone){
         qCritical() << "SDL could not initialize: " << SDL_GetError();
         return;
     }
-    if (SDL_NumJoysticks() < 1) {
-        qCritical() << "No controllers connected!";
-        return;
+    int num_controllers = SDL_NumJoysticks();
+    for(int i = 0; i < std::min(num_controllers, 2); i++){
+        if(SDL_IsGameController(i)){
+            SDL_GameController* controller = SDL_GameControllerOpen(i);
+            if(controller){
+                if(i == 0){
+                    controller_1 = controller;
+                    qInfo() << "Controller 1 connected: " << SDL_GameControllerName(controller_1);
+                    available++;
+                }
+                else{
+                    controller_2 = controller;
+                    qInfo() << "Controller 2 connected: " << SDL_GameControllerName(controller_2);
+                    available++;
+                }
+                controller = nullptr;
+            }
+        }
     }
-    controller = SDL_GameControllerOpen(0);
-    qInfo() << "Controller connected: " << SDL_GameControllerName(controller);
 }
 
 Controller::~Controller(){
     qInfo() << "Closing controller...";
-    if(controller){
-        SDL_GameControllerClose(controller);
+    if(controller_1){
+        SDL_GameControllerClose(controller_1);
+    }
+    if(controller_2){
+        SDL_GameControllerClose(controller_2);
     }
     SDL_Quit();
-    controller = nullptr;
+    controller_1 = nullptr;
+    controller_2 = nullptr;
 }
 
-std::vector<int> Controller::readState(){
+std::vector<int> Controller::readState(int id){
     std::vector<int> states(20, 0);
-    Sint16 axis;
-    if(!controller) return states;
+    int16_t axis;
+    SDL_GameController* controller;
+    if(id == 0 && controller_1)
+        controller = controller_1;
+    else if(id == 1 && controller_2)
+        controller = controller_2;
+    else return states;
 
     SDL_Event event;
     while(SDL_PollEvent(&event)){
         if(event.type == SDL_QUIT) return states;
     }
 
-    // Left X
     axis = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX);
     states[0] = (std::abs(axis) < dead_zone) ? 0 : static_cast<int>(nMap(axis, -32768, 32767, -255, 255));
-    // Left Y
     axis = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY);
     states[1] = (std::abs(axis) < dead_zone) ? 0 : -static_cast<int>(nMap(axis, -32768, 32767, -255, 255));
-
-    // Right X
     axis = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTX);
     states[2] = (std::abs(axis) < dead_zone) ? 0 : static_cast<int>(nMap(axis, -32768, 32767, -255, 255));
-    // Right Y
     axis = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTY);
     states[3] = (std::abs(axis) < dead_zone) ? 0 : -static_cast<int>(nMap(axis, -32768, 32767, -255, 255));
 
-    // Triggers
     states[4] = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) / 128;
     states[5] = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) / 128;
 
-    // Buttons
     states[6] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_UP) ? 1 : 0;
     states[7] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_DOWN) ? 1 : 0;
     states[8] = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_LEFT) ? 1 : 0;
@@ -147,27 +166,31 @@ void ModelWidget::updateState(BasePacket model_state){
     }
 
     updateModel(-model_state.body_y, model_state.body_z, -model_state.body_x);
-    updatePivot(1, 2, model_state.arm_l);
-    updatePivot(2, 2, 180.0-model_state.arm_r);
-    updatePivot(5, 1, model_state.art_1);
-    updatePivot(6, 2, model_state.art_2);
-    updatePivot(7, 2, model_state.art_3);
+    updatePivot(1, 2, model_state.arms);
+    updatePivot(2, 2, 180.0-model_state.arms);
+    updatePivot(6, 1, radToDeg(model_state.art_1));
+    updatePivot(7, 2, -radToDeg(model_state.art_2)-100);
+    updatePivot(8, 2, 180-radToDeg(model_state.art_3));
+    updatePivot(9, 1, radToDeg(model_state.art_4));
+    updatePivot(10, 2, -radToDeg(model_state.art_5));
+    updatePivot(11, 1, radToDeg(model_state.art_6));
+
     // not actually hand
     //model->updatePivot(9, 2, model_state.art_4);
 
     QColor color;
     if(model_state.track_l < 0.0)
-        color = QColor((int)nMap(model_state.track_l, -1.0, 0.0, 20, 250), 0, 0);
+        color = QColor((int)nMap(model_state.track_l, -1.8, 0.0, 20, 255), 0, 0);
     else if(model_state.track_l > 0.0)
-        color = QColor(0, (int)nMap(model_state.track_l, 0.0, 1.0, 20, 250), 0);
+        color = QColor(0, (int)nMap(model_state.track_l, 0.0, 1.8, 20, 255), 0);
     else
         color = Qt::black;
     updateColor(1, color);
 
     if(model_state.track_r < 0)
-        color = QColor((int)nMap(model_state.track_r, -1.0, 0.0, 20, 250), 0, 0);
+        color = QColor((int)nMap(model_state.track_r, -1.8, 0.0, 20, 255), 0, 0);
     else if(model_state.track_r > 0)
-        color = QColor(0, (int)nMap(model_state.track_r, 0.0, 1.0, 20, 250), 0);
+        color = QColor(0, (int)nMap(model_state.track_r, 0.0, 1.8, 20, 255), 0);
     else
         color = Qt::black;
     updateColor(0, color);
@@ -180,6 +203,7 @@ void ModelWidget::loadModels(){
     directional_light->setIntensity(0.75);
     directional_light->setWorldDirection(QVector3D(-1.0, -1.0, -1.0));
     light_entity->addComponent(directional_light);
+    /*
     std::vector<QString> mesh_addresses = {
         "../../assets/parts/body_nobands.obj",
         "../../assets/parts/left_arm.obj",
@@ -239,6 +263,78 @@ void ModelWidget::loadModels(){
         QVector3D(0, 0.29, 0),
         QVector3D(0, 0.07, -0.01),
         QVector3D(0, 0.18, 0)
+    };
+    */
+
+    std::vector<QString> mesh_addresses = {
+        "../../assets/parts/body_nobands.obj",
+        "../../assets/parts/left_arm.obj",
+        "../../assets/parts/right_arm.obj",
+        "../../assets/parts/band.obj",
+        "../../assets/parts/band.obj",
+        "../../assets/parts/base_link.obj",
+        "../../assets/parts/Link1.obj",
+        "../../assets/parts/Link2.obj",
+        "../../assets/parts/Link3.obj",
+        "../../assets/parts/Link4.obj",
+        "../../assets/parts/Link5.obj",
+        "../../assets/parts/Link6.obj"
+    };
+    std::vector<QQuaternion> mesh_rotations = {
+        QQuaternion::fromEulerAngles(0, 0, 0),
+        QQuaternion::fromEulerAngles(0, 0, 0),
+        QQuaternion::fromEulerAngles(0, 0, 0),
+        QQuaternion::fromEulerAngles(0, 0, 0),
+        QQuaternion::fromEulerAngles(0, 0, 0),
+        QQuaternion::fromEulerAngles(-90, 0, 0),
+        QQuaternion::fromEulerAngles(-90, 180, 0),
+        QQuaternion::fromEulerAngles(180, 0, 65),
+        QQuaternion::fromEulerAngles(180, 0, 80),
+        QQuaternion::fromEulerAngles(-90, 0, 0),
+        QQuaternion::fromEulerAngles(0, 0, 180),
+        QQuaternion::fromEulerAngles(-90, 0, 0)
+    };
+    std::vector<QVector3D> mesh_translations = {
+        QVector3D(0, 0, 0),
+        QVector3D(-0.27, -0.08, 0.0),
+        QVector3D(-0.27, -0.08, 0.0),
+        QVector3D(-0.02, -0.08, 0.0),
+        QVector3D(-0.02, -0.08, 0.0),
+        QVector3D(0.0, 0.0, 0.0),
+        QVector3D(0.0, 0.0, 0.0),
+        QVector3D(0.0, 0.0, 0.0),
+        QVector3D(0.0, 0.0, 0.0),
+        QVector3D(0.0, 0.0, 0.0),
+        QVector3D(0.0, 0.0, 0.0),
+        QVector3D(0.0, 0.0, 0.0)
+    };
+    std::vector<QQuaternion> pivot_rotations = {
+        QQuaternion::fromEulerAngles(0, 0, 0),
+        QQuaternion::fromEulerAngles(0, 0, 0),
+        QQuaternion::fromEulerAngles(180, 0, 0),
+        QQuaternion::fromEulerAngles(180, 0, 0),
+        QQuaternion::fromEulerAngles(180, 0, 0),
+        QQuaternion::fromEulerAngles(0, 0, 0),
+        QQuaternion::fromEulerAngles(0, 0, 0),
+        QQuaternion::fromEulerAngles(0, 0, 0),
+        QQuaternion::fromEulerAngles(0, 0, 0),
+        QQuaternion::fromEulerAngles(0, 0, 0),
+        QQuaternion::fromEulerAngles(0, 0, 0),
+        QQuaternion::fromEulerAngles(0, 0, 0)
+    };
+    std::vector<QVector3D> pivot_translations = {
+        QVector3D(0, 0, 0),
+        QVector3D(0.085, 0.087, 0.555),
+        QVector3D(0.085, 0.087, 0.145),
+        QVector3D(0, 0.087, 0.145),
+        QVector3D(0, 0.087, 0.617),
+        QVector3D(0.19, 0.16, 0.34),
+        QVector3D(0, 0.0, 0),
+        QVector3D(0, 0.05, 0),
+        QVector3D(-0.09, 0.35, 0.0),
+        QVector3D(0, 0.25, 0),
+        QVector3D(0.0, 0.06, 0.0),
+        QVector3D(0.0, 0.0, 0.0)
     };
     Qt3DExtras::QPhongMaterial* mesh_material = new Qt3DExtras::QPhongMaterial();
     mesh_material->setDiffuse(QColor("#a6a6a6"));
@@ -300,7 +396,7 @@ void ModelWidget::updateModel(float angleX, float angleY, float angleZ){
 
 void ModelWidget::updatePivot(int index, int axis, float angle){
     if(index >= pivots.size()){
-        qCritical() << "ModelWidget::updatePivot | Invalid pivot index: out of bounds";
+        qCritical() << "ModelWidget::updatePivot | Invalid pivot index: out of bounds " << index;
         return;
     }
     if(axis == 0)
@@ -598,25 +694,26 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
     });
     connect(camera_dropdown,  &QComboBox::currentIndexChanged, this, [this](int index){
         cam_id = index - 1;
+        // FIX RELAY FIRST
+        /*
         if(index != 0){
-        qDebug() << "calling resolution on " << cam_id;
-        emit resolutionChanged(cam_id, 1280, 720);
+            qDebug() << "calling resolution on " << cam_id;
+            emit resolutionChanged(cam_id, 1280, 720);
         }
-        qDebug() << "before emit";
+        */
+
         emit selectionChanged();
         filter_dropdown->setCurrentIndex(0);
         settings_dropdown->blockSignals(true);
         settings_dropdown->setCurrentIndex(0);
         settings_dropdown->blockSignals(false);
         if(index == 0){
-            qDebug() << "before enabled";
             filter_dropdown->setEnabled(false);
             settings_dropdown->setEnabled(false);
             if(!fullScreen)
                 current_size = QSize(480, 360);
             else
                 current_size = QSize(960, 720);
-            qDebug() << "before update";
             updateFrame(cv::imread("../../assets/imgs/404.png"));
         }
         else{
@@ -733,7 +830,7 @@ SubsectionWidget::SubsectionWidget(int id, QWidget *parent) : QWidget(parent){
 
 // --- Visual filters ---
 cv::Mat SubsectionWidget::Filters::thermalAdaptiveInterpolation(cv::Mat frame){
-    cv::resize(frame, frame, cv::Size(64, 64), 0, 0, cv::INTER_CUBIC);
+    /*cv::resize(frame, frame, cv::Size(64, 64), 0, 0, cv::INTER_CUBIC);
     double min_val, max_val;
     cv::minMaxLoc(frame, &min_val, &max_val);
     cv::Mat grad_x, grad_y, grad_mag;
@@ -749,6 +846,8 @@ cv::Mat SubsectionWidget::Filters::thermalAdaptiveInterpolation(cv::Mat frame){
             enhanced.at<float>(y, x) = frame.at<float>(y, x) * (1.0f + up_gradient.at<float>(y, x) * 0.3f);
         }
     }
+    const float TEMP_MIN = 20.0f;
+    const float TEMP_MAX = 60.0f;
     cv::normalize(enhanced, enhanced, min_val, max_val, cv::NORM_MINMAX);
     cv::Mat normalized;
     cv::normalize(enhanced, normalized, 0, 255, cv::NORM_MINMAX);
@@ -756,9 +855,9 @@ cv::Mat SubsectionWidget::Filters::thermalAdaptiveInterpolation(cv::Mat frame){
     cv::Mat colormap;
     cv::applyColorMap(normalized, colormap, cv::COLORMAP_JET);
     frame = colormap.clone();
-    cv::resize(frame, frame, cv::Size(1280, 720), cv::INTER_NEAREST);
+    cv::resize(frame, frame, cv::Size(1280, 1280), cv::INTER_NEAREST);
     cv::rotate(frame, frame, cv::ROTATE_180);
-    return frame;
+    return frame;*/
     /*
     double min_val, max_val;
     cv::Mat grad_x, grad_y, output;
@@ -782,37 +881,134 @@ cv::Mat SubsectionWidget::Filters::thermalAdaptiveInterpolation(cv::Mat frame){
     cv::resize(output, output, cv::Size(1280, 720), cv::INTER_NEAREST);
     return output;
     */
+    cv::resize(frame, frame, cv::Size(64, 64), 0, 0, cv::INTER_CUBIC);
+
+    // Fixed temperature range instead of dynamic
+    const float TEMP_MIN = 10.0f;  // Adjust these values for your sensor
+    const float TEMP_MAX = 40.0f;
+
+    cv::Mat grad_x, grad_y, grad_mag;
+    cv::Sobel(frame, grad_x, CV_32F, 1, 0, 3);
+    cv::Sobel(frame, grad_y, CV_32F, 0, 1, 3);
+    cv::magnitude(grad_x, grad_y, grad_mag);
+    cv::Mat up_gradient;
+    cv::resize(grad_mag, up_gradient, cv::Size(64, 64), 0, 0, cv::INTER_LINEAR);
+    cv::normalize(up_gradient, up_gradient, 0, 1, cv::NORM_MINMAX);
+
+    cv::Mat enhanced = frame.clone();
+    for(int y = 0; y < enhanced.rows; y++){
+        for(int x = 0; x < enhanced.cols; x++){
+            enhanced.at<float>(y, x) = frame.at<float>(y, x) * (1.0f + up_gradient.at<float>(y, x) * 0.3f);
+        }
+    }
+
+    // Use fixed range normalization
+    cv::Mat normalized = (enhanced - TEMP_MIN) * (255.0f / (TEMP_MAX - TEMP_MIN));
+    normalized.convertTo(normalized, CV_8U);
+
+    cv::Mat colormap;
+    cv::applyColorMap(normalized, colormap, cv::COLORMAP_JET);  // or try cv::COLORMAP_HOT
+    frame = colormap.clone();
+
+    cv::resize(frame, frame, cv::Size(1280, 1280), cv::INTER_NEAREST);
+    cv::rotate(frame, frame, cv::ROTATE_180);
+    return frame;
 }
 
 cv::Mat SubsectionWidget::Filters::thermalOverlay(cv::Mat frame, cv::Mat thermal, float distance, float alpha){
     if(distance == 0.0) return thermal;
+    else if(distance < 11.0)
+        return placeText("DISTANCE ERROR", frame);
 
     float cam_width = 2.0 * distance * tan(CAM_FOV.first / 2.0 * DEG_TO_RAD), cam_height = 2.0 * distance * tan(CAM_FOV.second / 2.0 * DEG_TO_RAD),
         thermal_width = 2.0 * distance * tan(THERMAL_FOV.first / 2.0 * DEG_TO_RAD), thermal_height = 2.0 * distance * tan(THERMAL_FOV.second / 2.0 * DEG_TO_RAD);
-    float left = std::max(-thermal_width/2.0, THERMAL_X_DIFF-(cam_width/2.0)), right = std::min(thermal_width/2.0, THERMAL_X_DIFF+(cam_width/2.0)),
-        up = std::min(thermal_height/2.0, (cam_height/2.0)-THERMAL_Y_DIFF), down = std::max(-thermal_height/2.0, -(cam_height/2.0)-THERMAL_Y_DIFF);
-    int cam_overlap_width = (right-left) / cam_width * frame.cols, cam_overlap_height = (up-down) / cam_height * frame.rows,
+    float left = std::max(-thermal_width/2.0, -cam_width/2.0), right = std::min(thermal_width/2.0, cam_width/2.0),
+        up = std::min((thermal_height/2.0)-THERMAL_Y_DIFF, cam_height/2.0), down = std::max(-thermal_height/2.0-THERMAL_Y_DIFF, -cam_height/2.0);
+    int cam_overlap_width = ((right-left) / cam_width) * frame.cols, cam_overlap_height = ((up-down) / cam_height) * frame.rows,
         thermal_overlap_width = (right-left) / thermal_width * thermal.cols, thermal_overlap_height = (up-down) / thermal_height * thermal.rows;
     //qDebug() << cam_width << " " << thermal_width << " " << left << " " << right << " " << cam_overlap_width << " " << thermal_overlap_width;
     //qDebug() << cam_height << " " << thermal_height << " " << up << " " << down << " " << cam_overlap_height << " " << thermal_overlap_height;
     //qDebug() << thermal.cols-thermal_overlap_width << " " << thermal.cols-thermal_overlap_height << " " << thermal_overlap_width << " " << thermal_overlap_height;
     if(thermal_overlap_width <= 0 || thermal_overlap_height <= 0 || cam_overlap_width <= 0 || cam_overlap_height <= 0)
         return placeText("BOUNDS ERROR", frame);
-    cv::Rect thermal_overlap(thermal.cols-thermal_overlap_width, thermal.rows-thermal_overlap_height, thermal_overlap_width, thermal_overlap_height);
+    //cv::Rect thermal_overlap(thermal.cols-thermal_overlap_width, thermal.rows-thermal_overlap_height, thermal_overlap_width, thermal_overlap_height);
     //qDebug() << frame.cols-cam_overlap_width << " " << frame.cols-cam_overlap_height << " " << cam_overlap_width << " " << cam_overlap_height;
-    //cv::Rect frame_overlap(0, 0, cam_overlap_width, cam_overlap_height);
-    cv::Rect frame_overlap(0, 0, cam_overlap_width, cam_overlap_height);
+    int lim = (((float(cam_height)/2.0)-up) / cam_height) * frame.rows;
+    int lim2 = (((float(cam_width)/2.0)-right) / cam_width) * frame.cols;
+
+    cv::Rect frame_overlap(lim2, lim, cam_overlap_width, cam_overlap_height);
     frame = frame(frame_overlap);
     //qDebug() << "done frame";
     //qDebug() << "thermal: " << thermal.cols << " " << thermal.rows << " " << thermal_overlap.x << " " << thermal_overlap.y << " " << thermal_overlap.width << " " << thermal_overlap.height;
-    thermal = thermal(thermal_overlap);
     //qDebug() << "done thermal";
-    cv::resize(frame, frame, cv::Size(1280, 720), cv::INTER_NEAREST);
-    cv::resize(thermal, thermal, cv::Size(1280, 720), cv::INTER_NEAREST);
+    cv::resize(frame, frame, cv::Size(1280, 1280), cv::INTER_NEAREST);
+    cv::resize(thermal, thermal, cv::Size(1280, 1280), cv::INTER_NEAREST);
     cv::addWeighted(frame, 1.0 - alpha, thermal, alpha, 0.0, frame);
 
     return frame;
 }
+/*
+cv::Mat SubsectionWidget::Filters::thermalOverlay(cv::Mat frame, cv::Mat thermal, float distance, float alpha){
+    if(distance == 0.0) return thermal;
+    else if(distance < 12.0)
+        return placeText("DISTANCE ERROR", frame);
+
+    double scale_x = CAM_FOV.first / THERMAL_FOV.first;
+    double scale_y = CAM_FOV.second / THERMAL_FOV.second;
+
+    cv::Mat cam2_scaled;
+    cv::resize(thermal, cam2_scaled, cv::Size(), scale_x, scale_y, cv::INTER_LINEAR);
+
+    double v_fov_rad_cam1 = CAM_FOV.second * (CV_PI / 180.0);
+    // How many radians each vertical pixel of cam1 covers
+    double v_angle_per_pixel_cam1 = v_fov_rad_cam1 / frame.rows;
+
+    double angular_shift_rad = atan(THERMAL_Y_DIFF / distance);
+    double offset_pixels = angular_shift_rad / v_angle_per_pixel_cam1;
+    double overlap_height_f = (frame.rows / 2.0) + (cam2_scaled.rows / 2.0) - offset_pixels;
+
+    if (overlap_height_f <= 0) {
+        qDebug() << "No overlap found at the given distance";
+        return frame;
+    }
+
+    // The final height is the calculated overlap, clamped to the bounds of both images.
+    int final_h = static_cast<int>(round(overlap_height_f));
+    final_h = std::min({final_h, frame.rows, cam2_scaled.rows});
+
+    if (final_h <= 0) {
+        qDebug() << "No overlap found after clamping to image dimensions.";
+        return frame;
+    }
+
+    // The final width is determined by the reference camera (cam1).
+    int final_w = frame.cols;
+
+    // --- Step 4: Define the Regions of Interest (ROI) for both images ---
+
+    // For cam1 (top camera), the ROI is the bottom-most part of the image.
+    cv::Rect roi1(0, frame.rows - final_h, final_w, final_h);
+
+    // For cam2 (bottom camera), the ROI is the top-most part of the scaled image.
+    // We also center-crop the width in case the scaling resulted in a different width than cam1.
+    int x_offset_cam2 = (cam2_scaled.cols - final_w) / 2;
+    cv::Rect roi2(x_offset_cam2, 0, final_w, final_h);
+
+    // Check if ROIs are valid
+    if ((roi1 & cv::Rect(0, 0, frame.cols, frame.rows)) != roi1 ||
+        (roi2 & cv::Rect(0, 0, cam2_scaled.cols, cam2_scaled.rows)) != roi2) {
+        qDebug() << "Error: Calculated ROI is out of image bounds.";
+        return frame;
+    }
+
+    cv::Mat cam1_crop = frame(roi1);
+    cv::Mat cam2_crop = cam2_scaled(roi2);
+
+    cv::Mat output_image;
+    cv::addWeighted(cam1_crop, 1.0 - alpha, cam2_crop, alpha, 0.0, output_image);
+
+    return output_image;
+}*/
 
 cv::Mat SubsectionWidget::Filters::detectHazmat(cv::Mat frame){
     int H = frame.rows;
@@ -1121,9 +1317,9 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
             subsections[i]->resizeLocal(new_size.width() / 3, new_size.height() / 2);
         }
     });
-    gas_label = new QLabel("No data");
-    gas_label->setAlignment({Qt::AlignHCenter, Qt::AlignVCenter});
-    gas_label->setStyleSheet(R"(
+    track_label = new QLabel("No data");
+    track_label->setAlignment({Qt::AlignHCenter, Qt::AlignVCenter});
+    track_label->setStyleSheet(R"(
         QLabel {
             color: white;
             font-size: 14px;
@@ -1199,12 +1395,11 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
             margin: 2px;
             background-color: red;
         }
-        QPushButton:pressed {
+        QPushButton:checked {
             background-color: orange;
         }
     )");
     restart_button = new QPushButton("Restart");
-    restart_button->setCheckable(true);
     restart_button->setStyleSheet(R"(
         QPushButton {
             font-size: 14px;
@@ -1220,7 +1415,6 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
         }
     )");
     controller_button = new QPushButton("Controller");
-    controller_button->setCheckable(true);
     controller_button->setStyleSheet(R"(
         QPushButton {
             font-size: 14px;
@@ -1236,23 +1430,27 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
         }
     )");
 
-    settings_label_1 = new QLabel(" Max speed ");
-    settings_label_2 = new QLabel(" 1600 ");
+    settings_label_1 = new QLabel(" Speed ");
+    settings_label_2 = new QLabel(" 100 ");
     settings_label_3 = new QLabel(" Setting ");
-    settings_label_4 = new QLabel(" 5 ");
+    settings_label_4 = new QLabel(" 0 ");
     settings_slider_1 = new QSlider(Qt::Horizontal);
     settings_slider_2 = new QSlider(Qt::Horizontal);
-    settings_slider_1->setRange(1400, 2000);
-    settings_slider_1->setValue(1600);
-    settings_slider_1->setTickInterval(100);
-    settings_slider_2->setRange(0, 10);
-    settings_slider_2->setValue(5);
+    settings_slider_1->setRange(0, 10);
+    settings_slider_1->setValue(4);
+    settings_slider_1->setTickInterval(1);
+    settings_slider_2->setRange(-90, 90);
+    settings_slider_2->setValue(0);
     settings_slider_2->setTickInterval(1);
+    connect(settings_slider_1, &QSlider::sliderReleased, this, [this](){
+        emit settingsChanged(settings_slider_1->value() * 25);
+    });
     connect(settings_slider_1, &QSlider::valueChanged, this, [this](int value){
-        settings_label_2->setText(QString(" %1 ").arg(value));
+        settings_label_2->setText(QString(" %1 ").arg(value * 25));
     });
     connect(settings_slider_2, &QSlider::valueChanged, this, [this](int value){
         settings_label_4->setText(QString(" %1 ").arg(value));
+        model->updatePivot(11, 1, value);
     });
 
     dashboard_container = new QWidget();
@@ -1260,21 +1458,62 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     settings_layout = new QGridLayout();
     button_layout = new QHBoxLayout();
     button_layout_2 = new QHBoxLayout();
-    std::vector<QString> labels = {"Gas sensor: ", "Speech: ", "Magnetometer: "};
+    std::vector<QString> labels = {"Track velocitiy: ", "Speech: ", "Magnetometer: "};
+    inner.resize(labels.size());
+    container.resize(labels.size());
     for(int i = 0; i < labels.size(); i++){
+        inner[i] = new QHBoxLayout;
+        inner[i]->setContentsMargins(0, 0, 0, 0);
+        inner[i]->setSpacing(0);
         sensor_label = new QLabel(labels[i]);
         sensor_label->setStyleSheet(R"(
             QLabel {
                 color: white;
                 font-size: 14px;
-                padding: 15px;
-                border: 1.5px solid gray;
                 font-family: Consolas;
             }
         )");
-        dashboard_layout->addWidget(sensor_label, i, 0);
+        container[i] = new QWidget;
+        if(i == 0){
+            track_indicator = new QLabel("");
+            track_indicator->setStyleSheet(R"(
+                background-color: red;
+                border-radius: 6px;
+            )");
+            track_indicator->setFixedSize(12, 12);
+            inner[i]->addWidget(track_indicator);
+        }
+        else if(i == 1){
+            speech_indicator = new QLabel("Opaaa");
+            speech_indicator->setStyleSheet(R"(
+                background-color: red;
+                border-radius: 6px;
+            )");
+            speech_indicator->setFixedSize(12, 12);
+            inner[i]->addWidget(speech_indicator);
+        }
+        else{
+            magnetometer_indicator = new QLabel("");
+            magnetometer_indicator->setStyleSheet(R"(
+                background-color: red;
+                border-radius: 6px;
+                padding: 2px;
+            )");
+            magnetometer_indicator->setFixedSize(12, 12);
+            inner[i]->addWidget(magnetometer_indicator);
+        }
+
+        container[i]->setStyleSheet(R"(
+            padding: 15px;
+            border: 1.5px solid gray;
+        )");
+        inner[i]->addWidget(sensor_label);
+        container[i]->setLayout(inner[i]);
+        //dashboard_layout->addWidget(sensor_label, i, 0);
+        //dashboard_layout->addLayout(inner, i, 0);
+        dashboard_layout->addWidget(container[i], i, 0);
     }
-    dashboard_layout->addWidget(gas_label, 0, 1);
+    dashboard_layout->addWidget(track_label, 0, 1);
     dashboard_layout->addWidget(speech_label, 1, 1);
     dashboard_layout->addWidget(magnetometer_label, 2, 1);
 
@@ -1297,13 +1536,31 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
     settings_layout->addWidget(settings_slider_2, 1, 1);
     settings_layout->addWidget(settings_label_4, 1, 2);
 
-    connect(microphone_button, &QPushButton::clicked, this, [this](){ emit buttonChanged(microphone_button->isChecked()); });
+    connect(microphone_button, &QPushButton::clicked, this, [this](){
+        emit buttonChanged(microphone_button->isChecked());
+        if(microphone_button->isChecked()){
+            speech_indicator->setStyleSheet(R"(
+                background-color: green;
+                border-radius: 6px;
+                padding: 2px;
+            )");
+            //speech_indicator->setStyleSheet("background-color: green");
+        }
+        else{
+            speech_indicator->setStyleSheet(R"(
+                background-color: red;
+                border-radius: 6px;
+                padding: 2px;
+            )");
+            speech_indicator->setStyleSheet("background-color: red");
+        }
+    });
     connect(clear_button, &QPushButton::clicked, this, [this](){
-        gas_label->setText("No data");
+        track_label->setText("No data");
         speech_label->setText("No data");
         magnetometer_label->setText("No data");
     });
-    connect(estop_button, &QPushButton::pressed, this, [this](){ emit estopCalled(); });
+    connect(estop_button, &QPushButton::clicked, this, [this](){ emit estopCalled(estop_button->isChecked()); });
     connect(restart_button, &QPushButton::clicked, this, [this](){
         QMessageBox::StandardButton reply;
         reply = QMessageBox::warning(this, "Restart relay", "<div align='center'>Are you sure you want to remotely restart the relay?<br>Connection will be forcibly closed.<br>MAKE SURE THE RELAY WAS LAUNCHED, NOT RAN</div>", QMessageBox::Yes | QMessageBox::Cancel);
@@ -1329,6 +1586,7 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent){
 
     main_layout->addWidget(left_container, 2);
     main_layout->addLayout(right_layout, 1);
+    indicators = std::vector<bool>(2, false);
 }
 
 void MainWindow::setCamPorts(int num_cams, std::vector<std::string> cam_names){
@@ -1370,13 +1628,16 @@ void MainWindow::updateFrame(int id, std::vector<unsigned char> data, bool bypas
 
 template<typename T> void MainWindow::updateDashbord(int index, T data){
     if(index == 0){
-        if constexpr(std::is_same_v<T, int>)
-            gas_label->setText(QString("%1 ppm").arg(data));
+        if constexpr(std::is_same_v<T, std::pair<float, float>>)
+            track_label->setText(QString("Left: %1\nRight: %2").arg(data.first, 0, 'f', 2).arg(data.second, 0, 'f', 2));
     }
     else if(index == 1){
         if constexpr(std::is_same_v<T, QString>){
-            //speech_label->setText(QString("%1 %2").arg(speech_label->text()).arg(data));
-            speech_label->setText(data);
+            if(speech_label->text() == "No data")
+                speech_label->setText(data);
+            else
+                speech_label->setText(QString("%1 %2").arg(speech_label->text()).arg(data));
+            //speech_label->setText(data);
         }
     }
     else if(index == 2){
@@ -1401,7 +1662,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     model->destroy();
     event->accept();
 
-    qInfo() << "Bye";
+    qInfo() << "--- Bye ---";
 }
 
 void MainWindow::resizeEvent(QResizeEvent* event){
@@ -1412,9 +1673,43 @@ void MainWindow::resizeEvent(QResizeEvent* event){
 void MainWindow::updateState(std::vector<float> data){
     BasePacket model_state;
     std::memcpy(&model_state, data.data(), sizeof(BasePacket));
-    updateDashbord(0, (int)model_state.gas_ppm);
+    updateDashbord(0, std::make_pair(model_state.track_l, model_state.track_r));
     updateDashbord(2, QVector3D(model_state.magnetometer_x, model_state.magnetometer_y, model_state.magnetometer_z));
     emit modelUpdated(model_state);
+
+    if((abs(model_state.track_l) >= 0.01 || abs(model_state.track_r) >= 0.01) && !indicators[0]){
+        track_indicator->setStyleSheet(R"(
+                background-color: green;
+                border-radius: 6px;
+                padding: 2px;
+        )");
+        indicators[0] = true;
+    }
+    else if((abs(model_state.track_l) < 0.01 || abs(model_state.track_r) < 0.01) && indicators[0]){
+        track_indicator->setStyleSheet(R"(
+                background-color: red;
+                border-radius: 6px;
+                padding: 2px;
+        )");
+        indicators[0] = false;
+    }
+
+    if(abs(model_state.magnetometer_z) >= 400 && !indicators[1]){
+        magnetometer_indicator->setStyleSheet(R"(
+                background-color: green;
+                border-radius: 6px;
+                padding: 2px;
+        )");
+        indicators[1] = true;
+    }
+    else if(abs(model_state.magnetometer_z) < 400 && indicators[1]){
+        magnetometer_indicator->setStyleSheet(R"(
+                background-color: red;
+                border-radius: 6px;
+                padding: 2px;
+        )");
+        indicators[1] = false;
+    }
 }
 
 void MainWindow::updateThermal(std::vector<float> data){
@@ -1618,8 +1913,10 @@ AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
         dup2(dev_null, STDERR_FILENO);
         close(dev_null);
     }
+
     Pa_Initialize();
-    Pa_OpenDefaultStream(&stream, 0, 1, paInt16, SAMPLE_RATE, AUDIO_BUFFER_SIZE, nullptr, nullptr);
+    player = new AudioPlayer;
+
     if(stderr_backup != -1) {
         fflush(stderr);
         dup2(stderr_backup, STDERR_FILENO);
@@ -1631,16 +1928,22 @@ AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
     audio_channel = new SocketStruct;
     audio_channel->target_socket = new RTPStreamHandler(port + 2, CLIENT_IP, PayloadType::AUDIO_PCM);
     audio_channel->target_socket->setUCharCallback([this](std::vector<uchar> data){
-        std::vector<opus_int16> output(AUDIO_BUFFER_SIZE);
+        std::vector<int16_t> output(AUDIO_BUFFER_SIZE);
         int frames = opus_decode(opus_decoder, data.data(), data.size(), output.data(), output.size(), 0);
         {
             std::lock_guard<std::mutex> lock(vosk_mutex);
             audio_queue.push(output);
-            while(audio_queue.size() > 50) {
+            while(audio_queue.size() > 50){
                 audio_queue.pop();
             }
         }
-        Pa_WriteStream(stream, output.data(), frames);
+        player->passAudio(output);
+        /*
+        PaError err = Pa_WriteStream(stream, output.data(), frames);
+        if (err != paNoError) {
+            qDebug() << "error: " << Pa_GetErrorText(err);
+        }
+        */
     });
     opus_decoder = opus_decoder_create(SAMPLE_RATE, 1, &pa_error);
 
@@ -1654,11 +1957,11 @@ AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
     qInfo() << "Initializing vosk model...";
 
     // - remove the first two "/" to skip vosk init -
-    /*
+    ///*
     vosk_set_log_level(-1);
     vosk_model = vosk_model_new(VOSK_MODEL_PATH);
     vocab_json = nlohmann::json(VOSK_VOCAB).dump();
-    //vosk_recognizer = vosk_recognizer_new_grm(vosk_model, SAMPLE_RATE, vocab_json.c_str());
+    vosk_recognizer = vosk_recognizer_new_grm(vosk_model, SAMPLE_RATE, vocab_json.c_str());
     //*/
     // ??????????????????????
     //vosk_recognizer = vosk_recognizer_new(vosk_model, SAMPLE_RATE);
@@ -1680,9 +1983,9 @@ AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
         }
     });
 
-    connect(window, &MainWindow::estopCalled, this, [this](){
+    connect(window, &MainWindow::estopCalled, this, [this](bool state){
         qInfo() << "E-Stop called";
-        base_channel->target_socket->sendPacket(std::vector<int>{0, -1});
+        base_channel->target_socket->sendPacket(std::vector<int>{ 0, -1, (int)state });
     });
     connect(window, &MainWindow::controllerCalled, this, [this](){
         qInfo() << "Controller restart called";
@@ -1692,8 +1995,20 @@ AppHandler::AppHandler(int port, QObject* parent) : QObject(parent){
         controller_channel->is_active.store(true);
     });
     connect(window, &MainWindow::resolutionChanged, this, [this](int id, int width, int height){
+        qDebug() << "here " << id << " " << num_cams;
+        if(id >= num_cams){
+            cams[id-num_cams]->cap->release();
+            cams[id-num_cams]->cap = new cv::VideoCapture(local_cam_ports[id-num_cams], cv::CAP_V4L2);
+            cams[id-num_cams]->cap->set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M','J','P','G'));
+            cams[id-num_cams]->cap->set(cv::CAP_PROP_FRAME_WIDTH, 1280);
+            cams[id-num_cams]->cap->set(cv::CAP_PROP_FRAME_HEIGHT, 720);
+            return;
+        }
         std::lock_guard<std::mutex> lock(video_mutex);
         video_channels[id]->int_data = std::vector<int>{width, height};
+    });
+    connect(window, &MainWindow::settingsChanged, this, [this](int value){
+        base_channel->target_socket->sendPacket(std::vector<int>{ 0, 2, value });
     });
     connect(window, &MainWindow::restartCalled, this, [this](){
         qInfo() << "Relay restart called";
@@ -1725,8 +2040,10 @@ AppHandler::~AppHandler(){
         audio_channel->recv_thread.join();
     if(audio_channel->send_thread.joinable())
         audio_channel->send_thread.join();
-    Pa_StopStream(stream);
-    Pa_CloseStream(stream);
+    //Pa_StopStream(stream);
+    //Pa_CloseStream(stream);
+    //Pa_Terminate();
+    player->destroy();
     Pa_Terminate();
     opus_decoder_destroy(opus_decoder);
 
@@ -1764,15 +2081,15 @@ AppHandler::~AppHandler(){
 
 void AppHandler::init(){
     num_cams = 0;
-    local_cams = 0;
+    local_cams = 1;
     local_cam_ports = {2};
 
     for(int i = 0; i < local_cams; i++){
         CamStruct* cam = new CamStruct;
         cam->cap = new cv::VideoCapture(local_cam_ports[i], cv::CAP_V4L2);
         cam->cap->set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M','J','P','G'));
-        cam->cap->set(cv::CAP_PROP_FRAME_WIDTH, 1280);
-        cam->cap->set(cv::CAP_PROP_FRAME_HEIGHT, 720);
+        //cam->cap->set(cv::CAP_PROP_FRAME_WIDTH, 1280);
+        //cam->cap->set(cv::CAP_PROP_FRAME_HEIGHT, 720);
         cams.push_back(std::move(cam));
         cams[i]->is_active.store(false);
         cams[i]->is_send_running.store(true);
@@ -1784,7 +2101,11 @@ void AppHandler::init(){
                 }
                 cv::Mat frame;
                 (*cams[i]->cap) >> frame;
-                //frame = undistortFisheyeApprox(frame);
+                if(frame.empty()){
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    continue;
+                }
+                cv::resize(frame, frame, cv::Size(1280, 720), 0, 0, cv::INTER_LINEAR);
                 std::vector<unsigned char> buffer(frame.data, frame.data + frame.total()*frame.elemSize());
                 window->updateFrame(i+num_cams, buffer, true);
                 std::this_thread::sleep_for(std::chrono::milliseconds(33));
@@ -1792,7 +2113,7 @@ void AppHandler::init(){
         });
     }
 
-    qInfo() << "Awaiting relay connection...";
+    qInfo() << "--- Awaiting relay connection... ---";
 
     std::vector<std::string> cam_names;
 
@@ -1864,7 +2185,7 @@ void AppHandler::init(){
 
     audio_channel->is_recv_running.store(true);
     audio_channel->is_send_running.store(true);
-    Pa_StartStream(stream);
+    //Pa_StartStream(stream);
     audio_channel->recv_thread = std::thread([this](){
         while(audio_channel->is_recv_running.load()){
             audio_channel->target_socket->recvPacket();
@@ -1887,13 +2208,18 @@ void AppHandler::init(){
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 continue;
             }
-            std::vector<int> data = controller->readState();
+            int available = controller->getAvailable();
+            std::vector<int> data;
+            for(int i = 0; i < available; i++){
+                std::vector<int> controller_data = controller->readState(i);
+                data.insert(data.end(), controller_data.begin(), controller_data.end());
+            }
             controller_channel->target_socket->sendPacket(data);
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     });
 
-    qInfo() << "Starting vosk model...";
+    qInfo() << "Starting vosk thread...";
 
     is_audio_active.store(false);
     vosk_thread = std::thread([this](){
@@ -1930,7 +2256,66 @@ void AppHandler::init(){
 
     window->show();
 
-    qInfo() << "Program init complete";
+    qInfo() << "--- Program init complete ---";
+}
+
+AudioPlayer::AudioPlayer(){
+    stream_params.device = Pa_GetDefaultOutputDevice();
+    stream_params.channelCount = 1;
+    stream_params.sampleFormat = paInt16;
+    stream_params.suggestedLatency = Pa_GetDeviceInfo(stream_params.device)->defaultLowOutputLatency;
+    stream_params.hostApiSpecificStreamInfo = nullptr;
+    Pa_OpenStream(
+        &stream,
+        nullptr,
+        &stream_params,
+        SAMPLE_RATE,
+        paFramesPerBufferUnspecified,
+        paNoFlag,
+        audioCallback,
+        this
+    );
+    Pa_StartStream(stream);
+}
+
+AudioPlayer::~AudioPlayer(){
+    if(stream){
+        Pa_StopStream(stream);
+        Pa_CloseStream(stream);
+    }
+}
+
+void AudioPlayer::passAudio(std::vector<int16_t> data){
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    audio_queue.push(data);
+}
+
+int AudioPlayer::audioProcess(int16_t* output, unsigned long buffer_size){
+    unsigned long frames_written = 0;
+    while(frames_written < buffer_size){
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        if(audio_queue.empty()) {
+            for(unsigned long i = frames_written; i < buffer_size; i++) {
+                output[i] = 0;
+            }
+            return paContinue;
+        }
+        std::vector<int16_t>& front = audio_queue.front();
+        unsigned long samples = front.size() - offset;
+        unsigned long frames = std::min(samples, buffer_size - frames_written);
+        if (frames > 0) {
+            int16_t* source = &front[offset];
+            int16_t* destination = &output[frames_written];
+            std::copy(source, source + frames, destination);
+        }
+        offset += frames;
+        frames_written += frames;
+        if (offset >= front.size()) {
+            audio_queue.pop();
+            offset = 0;
+        }
+    }
+    return paContinue;
 }
 
 // --- (Optional) console logs ---
